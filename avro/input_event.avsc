@@ -1,0 +1,18 @@
+{
+  "type": "record",
+  "name": "InputEvent",
+  "namespace": "com.lineage",
+  "fields": [
+    {
+      "name": "uuid",
+      "type": "string"
+    },
+    {
+      "name": "timestamp",
+      "type": {
+        "type": "long",
+        "logicalType": "timestamp-millis"
+      }
+    }
+  ]
+}
