@@ -1,6 +1,6 @@
 # Flink Lineage Pipeline
 
-Kafka-to-S3 pipeline that reads Avro messages from Kafka, enriches them with Kafka metadata (topic, partition, offset), and writes Parquet files to S3-compatible storage (MinIO). Includes an offset index sidecar for lightweight gap detection without full data scans.
+Kafka-to-S3 pipeline that reads Avro messages from Kafka, enriches them with Kafka metadata (topic, partition, offset), and writes Parquet files to S3-compatible storage (MinIO). Includes checkpoint-aligned offset indexing for lightweight gap detection without full data scans.
 
 ## Prerequisites
 
@@ -33,21 +33,32 @@ Kafka (lineage-input topic, 10 partitions)
 Flink: RawKafkaDeserializer (pass-through ConsumerRecord)
     |
     v
-Flink: EnrichFunction (deserialize Avro, add kafka_topic/partition/offset)
+Flink: OffsetTrackingEnrichFunction
+  - Deserializes Avro, adds kafka_topic/partition/offset
+  - Tracks per-partition offset ranges in-memory
+  - Writes Parquet index files on checkpoint completion (CheckpointListener)
     |
-    +---> FileSink --> s3://flink-data/output/         (enriched data, partitioned by date/hour)
-    |
-    +---> keyBy(kafka_partition)
-          --> OffsetIndexFunction (per-partition min/max offset + count, 60s windows)
-              --> FileSink --> s3://flink-data/offset-index/  (tiny index files)
+    v
+FileSink --> s3://flink-data/output/          (enriched data, partitioned by date/hour)
+         +-> s3://flink-data/offset-index/    (index files written directly on checkpoint)
 ```
 
 ### Data Flow
 
 - **Data generator**: Produces ~10 Avro messages/sec across 10 Kafka partitions
-- **Flink job**: Consumes from Kafka, enriches with metadata, writes Parquet to two sinks
+- **Flink job**: Consumes from Kafka, enriches with metadata, writes Parquet to S3
 - **Data sink**: Full enriched records partitioned by `year=/month=/day=/hour=`
-- **Offset index sink**: Lightweight per-partition summaries emitted every 60 seconds
+- **Offset index**: Per-partition offset summaries written directly as Parquet on each checkpoint — no second Flink sink needed
+
+### Offset Index Design
+
+The `OffsetTrackingEnrichFunction` combines enrichment and offset tracking in a single operator:
+
+1. **`processElement()`** — deserializes Avro, enriches with Kafka metadata, and updates in-memory per-partition accumulators (min/max offset, count)
+2. **`snapshotState()`** — serializes accumulators to Flink `ListState` for fault tolerance and stashes a copy for the pending checkpoint
+3. **`notifyCheckpointComplete()`** — writes a small Parquet file per subtask to `s3://flink-data/offset-index/chk-{id}/subtask-{index}.parquet` using Flink's `FileSystem` API
+
+This replaces the previous approach of a separate `keyBy → OffsetIndexFunction → FileSink` branch, eliminating one operator, its keyed state, and a second file writer.
 
 ## Services
 
@@ -71,15 +82,18 @@ Schema: `uuid` (string), `timestamp` (long), `kafka_topic` (string), `kafka_part
 
 ### Offset Index Files
 
-Written to `s3://flink-data/offset-index/` with date-hour buckets:
+Written to `s3://flink-data/offset-index/` per checkpoint:
 
 ```
-offset-index/2026-02-24--20/part-*.parquet
+offset-index/chk-1/subtask-0.parquet
+offset-index/chk-1/subtask-1.parquet
+offset-index/chk-2/subtask-0.parquet
+...
 ```
 
 Schema: `kafka_partition` (int), `min_offset` (long), `max_offset` (long), `record_count` (long), `window_start` (timestamp)
 
-Each file is ~1.6 KB. The `OffsetIndexFunction` tracks per-partition min/max offset and record count using Flink `ValueState`, emitting a summary every 60 seconds via a processing-time timer.
+Each file is ~1.6 KB. A new set of files is produced every checkpoint interval (60s).
 
 ## Gap Detection
 
@@ -92,7 +106,7 @@ SELECT kafka_partition,
        sum(record_count) AS total_rows,
        max(max_offset) - min(min_offset) + 1 AS expected_rows,
        max(max_offset) - min(min_offset) + 1 - sum(record_count) AS gaps
-FROM read_parquet('offset-index/*')
+FROM read_parquet('offset-index/chk-*/*.parquet')
 GROUP BY kafka_partition;
 ```
 
@@ -111,7 +125,7 @@ SELECT kafka_partition,
        sum(record_count) AS total_rows,
        max(max_offset) - min(min_offset) + 1 AS expected_rows,
        max(max_offset) - min(min_offset) + 1 - sum(record_count) AS gaps
-FROM read_parquet('/tmp/offset-index/**/*')
+FROM read_parquet('/tmp/offset-index/chk-*/*.parquet')
 GROUP BY kafka_partition
 ORDER BY kafka_partition;
 "
@@ -128,7 +142,7 @@ Environment variables (set in `docker-compose.yml`):
 | `KAFKA_BOOTSTRAP_SERVERS` | `kafka:9092` | Kafka broker address |
 | `KAFKA_TOPIC` | `lineage-input` | Source Kafka topic |
 | `OUTPUT_PATH` | `s3://flink-data/output` | Data sink path |
-| `OFFSET_INDEX_PATH` | `s3://flink-data/offset-index` | Offset index sink path |
+| `OFFSET_INDEX_PATH` | `s3://flink-data/offset-index` | Offset index base path |
 
 Flink settings are in `flink-conf/flink-conf.yaml`:
 - Checkpointing: 60s interval, EXACTLY_ONCE
@@ -151,11 +165,11 @@ flink-lineage/
 ├── flink-job/
 │   ├── pom.xml
 │   └── src/main/java/com/lineage/
-│       ├── AvroSchema.java            # Schema definitions (input, enriched, offset index)
-│       ├── EnrichedEvent.java         # Enriched event POJO
-│       ├── InputEvent.java            # Input event POJO
-│       ├── LineageJob.java            # Main Flink job (sources, sinks, wiring)
-│       └── OffsetIndexFunction.java   # Keyed process function for offset tracking
+│       ├── AvroSchema.java                      # Schema definitions (input, enriched, offset index)
+│       ├── EnrichedEvent.java                   # Enriched event POJO
+│       ├── InputEvent.java                      # Input event POJO
+│       ├── LineageJob.java                      # Main Flink job (source, sink, wiring)
+│       └── OffsetTrackingEnrichFunction.java    # Enrich + checkpoint-based offset index
 ├── scripts/
 │   └── build-and-run.sh              # One-command build and deploy
 ├── docker-compose.yml

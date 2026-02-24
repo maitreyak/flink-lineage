@@ -1,10 +1,6 @@
 package com.lineage;
 
 import org.apache.avro.generic.GenericRecord;
-import org.apache.avro.generic.GenericRecordBuilder;
-import org.apache.avro.io.BinaryDecoder;
-import org.apache.avro.io.DecoderFactory;
-import org.apache.avro.generic.GenericDatumReader;
 
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
@@ -26,7 +22,6 @@ import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.IOException;
 import java.time.ZoneOffset;
 
 /**
@@ -65,9 +60,9 @@ public class LineageJob {
                 WatermarkStrategy.noWatermarks(),
                 "Kafka Source");
 
-        // Deserialize Avro + enrich with Kafka metadata -> GenericRecord
+        // Deserialize Avro + enrich with Kafka metadata + track offsets per checkpoint
         DataStream<GenericRecord> enrichedStream = kafkaStream
-                .process(new EnrichFunction())
+                .process(new OffsetTrackingEnrichFunction(OFFSET_INDEX_PATH))
                 .returns(new GenericRecordAvroTypeInfo(AvroSchema.ENRICHED_EVENT_SCHEMA));
 
         // File sink: Parquet with date-time bucket assigner
@@ -80,21 +75,6 @@ public class LineageJob {
                 .build();
 
         enrichedStream.sinkTo(fileSink);
-
-        // Offset index sink: lightweight per-partition offset summaries for gap detection
-        DataStream<GenericRecord> offsetIndexStream = enrichedStream
-                .keyBy(r -> (int) r.get("kafka_partition"))
-                .process(new OffsetIndexFunction())
-                .returns(new GenericRecordAvroTypeInfo(AvroSchema.OFFSET_INDEX_SCHEMA));
-
-        FileSink<GenericRecord> offsetIndexSink = FileSink
-                .forBulkFormat(
-                        new Path(OFFSET_INDEX_PATH),
-                        AvroParquetWriters.forGenericRecord(AvroSchema.OFFSET_INDEX_SCHEMA))
-                .withRollingPolicy(OnCheckpointRollingPolicy.build())
-                .build();
-
-        offsetIndexStream.sinkTo(offsetIndexSink);
 
         env.execute("Kafka-to-S3 Lineage Pipeline");
     }
@@ -123,49 +103,4 @@ public class LineageJob {
         }
     }
 
-    /**
-     * ProcessFunction that deserializes Avro payload and enriches with Kafka metadata.
-     */
-    public static class EnrichFunction
-            extends org.apache.flink.streaming.api.functions.ProcessFunction<
-                ConsumerRecord<byte[], byte[]>, GenericRecord> {
-
-        private static final long serialVersionUID = 1L;
-        private transient GenericDatumReader<GenericRecord> reader;
-        private transient DecoderFactory decoderFactory;
-
-        @Override
-        public void open(org.apache.flink.configuration.Configuration parameters) {
-            reader = new GenericDatumReader<>(AvroSchema.INPUT_EVENT_SCHEMA);
-            decoderFactory = DecoderFactory.get();
-        }
-
-        @Override
-        public void processElement(
-                ConsumerRecord<byte[], byte[]> record,
-                Context ctx,
-                Collector<GenericRecord> out) {
-            try {
-                byte[] value = record.value();
-                BinaryDecoder decoder = decoderFactory.binaryDecoder(value, null);
-                GenericRecord inputRecord = reader.read(null, decoder);
-
-                String uuid = inputRecord.get("uuid").toString();
-                long timestamp = (Long) inputRecord.get("timestamp");
-
-                GenericRecord enriched = new GenericRecordBuilder(AvroSchema.ENRICHED_EVENT_SCHEMA)
-                        .set("uuid", uuid)
-                        .set("timestamp", timestamp)
-                        .set("kafka_topic", record.topic())
-                        .set("kafka_partition", record.partition())
-                        .set("kafka_offset", record.offset())
-                        .build();
-
-                out.collect(enriched);
-            } catch (IOException e) {
-                LOG.error("Failed to deserialize Avro record from partition={} offset={}",
-                        record.partition(), record.offset(), e);
-            }
-        }
-    }
 }
