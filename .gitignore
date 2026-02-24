@@ -1,0 +1,14 @@
+# Maven build output
+flink-job/target/
+flink-job/dependency-reduced-pom.xml
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.project
+.classpath
+.settings/
+
+# OS
+.DS_Store
