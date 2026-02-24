@@ -1,0 +1,37 @@
+# Flink configuration for Kafka-to-S3 lineage pipeline
+
+# State backend: RocksDB
+state.backend: rocksdb
+state.backend.incremental: true
+state.checkpoints.dir: s3://flink-data/checkpoints
+state.savepoints.dir: s3://flink-data/savepoints
+
+# Checkpointing
+execution.checkpointing.interval: 60000
+execution.checkpointing.mode: EXACTLY_ONCE
+execution.checkpointing.min-pause: 10000
+execution.checkpointing.timeout: 300000
+execution.checkpointing.externalized-checkpoint-retention: RETAIN_ON_CANCELLATION
+
+# S3 (MinIO) configuration
+s3.endpoint: http://minio:9000
+s3.path-style-access: true
+s3.access-key: minioadmin
+s3.secret-key: minioadmin
+
+# JobManager
+jobmanager.rpc.address: flink-jobmanager
+jobmanager.rpc.port: 6123
+jobmanager.memory.process.size: 1024m
+
+# TaskManager
+taskmanager.numberOfTaskSlots: 2
+taskmanager.memory.process.size: 2048m
+
+# Web UI
+rest.port: 8081
+rest.address: 0.0.0.0
+rest.bind-address: 0.0.0.0
+
+# Parallelism
+parallelism.default: 2

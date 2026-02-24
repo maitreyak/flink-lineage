@@ -1,0 +1,11 @@
+FROM flink:1.19-java11
+
+# Install S3 plugin
+RUN mkdir -p /opt/flink/plugins/s3-fs-hadoop && \
+    cp /opt/flink/opt/flink-s3-fs-hadoop-*.jar /opt/flink/plugins/s3-fs-hadoop/
+
+# Copy the job JAR
+COPY flink-job/target/flink-lineage-job-1.0-SNAPSHOT.jar /opt/flink/usrlib/flink-lineage-job.jar
+
+# Copy Flink config
+COPY flink-conf/flink-conf.yaml /opt/flink/conf/flink-conf.yaml
