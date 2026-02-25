@@ -133,6 +133,53 @@ ORDER BY kafka_partition;
 
 A `gaps` value of 0 means no dropped messages for that partition.
 
+## Caveats
+
+The CheckpointListener-based offset index trades operational simplicity (one fewer operator and sink) for some failure-mode trade-offs compared to the previous side-output approach.
+
+### 1. S3 write failure kills the data path
+
+If S3/MinIO is unreachable during `notifyCheckpointComplete()`, the exception propagates and **fails the task**, triggering a restart — even though the checkpoint and data writes succeeded. The old side-output approach had independent sinks, so index write failures couldn't affect data throughput.
+
+**Severity**: High. A non-critical sidecar write can cause availability loss on the primary data path.
+
+### 2. Orphaned index files after checkpoint rollback
+
+Index files are written in `notifyCheckpointComplete()` outside of Flink's transactional sink protocol. If a downstream operator fails after the index is written but before the checkpoint fully commits, Flink rolls back to the previous checkpoint. The data sink discards uncommitted files, but the **index file persists on S3** — referencing offsets that no longer appear in any data file.
+
+**Severity**: Medium. Gap detection may undercount gaps (false negatives) for the affected checkpoint window.
+
+### 3. Duplicate offset counts after recovery
+
+After a failure, Flink restores from the last successful checkpoint and replays Kafka records. The replayed window produces a new `chk-{id}` index with a new checkpoint ID but **overlapping offsets** with the orphaned index from the failed attempt. The gap detection query sums `record_count` across all files, so overlapping windows **double-count** offsets, potentially showing negative gap values.
+
+**Severity**: Medium. Can mask real gaps. Mitigated by cleaning up orphaned `chk-*` directories for checkpoints beyond the latest restored ID.
+
+### 4. Memory leak from abandoned checkpoints
+
+If a checkpoint times out at the coordinator without sending a completion or abort notification, the corresponding snapshot stays in the `pendingSnapshots` ConcurrentHashMap indefinitely. With frequent timeouts, this slowly leaks memory.
+
+**Severity**: Low. Unlikely under normal operation (Flink usually sends abort notifications), but possible under sustained checkpoint pressure.
+
+### 5. Wider blast radius per subtask
+
+The old approach used `keyBy(partition)` to isolate each partition's state. Now each subtask handles multiple partitions (e.g., 5 partitions per subtask with parallelism=2). If a subtask's index write fails mid-file, offset data for **all partitions on that subtask** is lost, not just one.
+
+**Severity**: Low-Medium. Increases the scope of a single write failure.
+
+### 6. No backpressure from index writes
+
+The old FileSink participated in Flink's backpressure mechanism — slow S3 writes naturally slowed the pipeline. The direct `AvroParquetWriter` in `notifyCheckpointComplete()` runs outside backpressure. A slow write blocks the checkpoint completion callback, potentially delaying subsequent checkpoints and causing a timeout cascade.
+
+**Severity**: Medium. Most visible during S3 latency spikes.
+
+### Possible mitigations
+
+- Wrap the index write in a try/catch to log-and-skip on failure, decoupling it from the data path (addresses #1)
+- Write index files asynchronously in a background thread (addresses #1 and #6)
+- Include the checkpoint ID in index records and deduplicate in the gap detection query (addresses #3)
+- Add a TTL or max-size bound to `pendingSnapshots` (addresses #4)
+
 ## Configuration
 
 Environment variables (set in `docker-compose.yml`):
