@@ -72,7 +72,7 @@ Written to `s3://flink-data/output/` with date-hour partitioning:
 output/year=2026/month=02/day=24/hour=20/part-*.parquet
 ```
 
-Schema: `uuid` (string), `timestamp` (long), `kafka_topic` (string), `kafka_partition` (int), `kafka_offset` (long)
+Schema: `uuid` (string), `timestamp` (long), `kafka_topic` (string), `kafka_partition` (int), `kafka_offset` (long), `checkpoint_id` (long)
 
 ### Commit Log Files
 

@@ -37,6 +37,7 @@ public final class AvroSchema {
                 .requiredString("kafka_topic")
                 .requiredInt("kafka_partition")
                 .requiredLong("kafka_offset")
+                .requiredLong("checkpoint_id")
                 .endRecord();
     }
 }

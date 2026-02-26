@@ -6,6 +6,9 @@ import org.apache.avro.generic.GenericDatumReader;
 import org.apache.avro.io.BinaryDecoder;
 import org.apache.avro.io.DecoderFactory;
 
+import org.apache.flink.runtime.state.FunctionInitializationContext;
+import org.apache.flink.runtime.state.FunctionSnapshotContext;
+import org.apache.flink.streaming.api.checkpoint.CheckpointedFunction;
 import org.apache.flink.streaming.api.functions.ProcessFunction;
 import org.apache.flink.util.Collector;
 
@@ -18,16 +21,18 @@ import java.io.IOException;
 
 /**
  * Deserializes Avro messages from Kafka and enriches them with
- * Kafka metadata (topic, partition, offset).
+ * Kafka metadata (topic, partition, offset, checkpoint_id).
  */
 public class EnrichFunction
-        extends ProcessFunction<ConsumerRecord<byte[], byte[]>, GenericRecord> {
+        extends ProcessFunction<ConsumerRecord<byte[], byte[]>, GenericRecord>
+        implements CheckpointedFunction {
 
     private static final long serialVersionUID = 1L;
     private static final Logger LOG = LoggerFactory.getLogger(EnrichFunction.class);
 
     private transient GenericDatumReader<GenericRecord> reader;
     private transient DecoderFactory decoderFactory;
+    private transient long currentCheckpointId;
 
     @Override
     public void open(org.apache.flink.configuration.Configuration parameters) {
@@ -54,6 +59,7 @@ public class EnrichFunction
                     .set("kafka_topic", record.topic())
                     .set("kafka_partition", record.partition())
                     .set("kafka_offset", record.offset())
+                    .set("checkpoint_id", currentCheckpointId)
                     .build();
 
             out.collect(enriched);
@@ -61,5 +67,15 @@ public class EnrichFunction
             LOG.error("Failed to deserialize Avro record from partition={} offset={}",
                     record.partition(), record.offset(), e);
         }
+    }
+
+    @Override
+    public void snapshotState(FunctionSnapshotContext context) throws Exception {
+        currentCheckpointId = context.getCheckpointId();
+    }
+
+    @Override
+    public void initializeState(FunctionInitializationContext context) throws Exception {
+        // No state to restore — checkpoint_id is transient
     }
 }
