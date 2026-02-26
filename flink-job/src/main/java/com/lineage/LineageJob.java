@@ -39,8 +39,6 @@ public class LineageJob {
             "KAFKA_TOPIC", "lineage-input");
     private static final String OUTPUT_PATH = System.getenv().getOrDefault(
             "OUTPUT_PATH", "s3://flink-data/output");
-    private static final String OFFSET_INDEX_PATH = System.getenv().getOrDefault(
-            "OFFSET_INDEX_PATH", "s3://flink-data/offset-index");
     private static final String COMMIT_LOG_PATH = System.getenv().getOrDefault(
             "COMMIT_LOG_PATH", "s3://flink-data/commit-log");
 
@@ -62,9 +60,9 @@ public class LineageJob {
                 WatermarkStrategy.noWatermarks(),
                 "Kafka Source");
 
-        // Deserialize Avro + enrich with Kafka metadata + track offsets per checkpoint
+        // Deserialize Avro + enrich with Kafka metadata
         DataStream<GenericRecord> enrichedStream = kafkaStream
-                .process(new OffsetTrackingEnrichFunction(OFFSET_INDEX_PATH))
+                .process(new EnrichFunction())
                 .returns(new GenericRecordAvroTypeInfo(AvroSchema.ENRICHED_EVENT_SCHEMA));
 
         // File sink: Parquet with date-time bucket assigner

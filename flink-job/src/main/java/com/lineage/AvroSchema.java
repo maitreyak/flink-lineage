@@ -17,9 +17,6 @@ public final class AvroSchema {
     /** Schema for the enriched record written to Parquet. */
     public static final Schema ENRICHED_EVENT_SCHEMA;
 
-    /** Schema for the offset index sidecar (gap detection without full scans). */
-    public static final Schema OFFSET_INDEX_SCHEMA;
-
     static {
         // Input: uuid (string), timestamp (long/timestamp-millis)
         Schema timestampMillis = LogicalTypes.timestampMillis().addToSchema(Schema.create(Schema.Type.LONG));
@@ -40,19 +37,6 @@ public final class AvroSchema {
                 .requiredString("kafka_topic")
                 .requiredInt("kafka_partition")
                 .requiredLong("kafka_offset")
-                .requiredLong("checkpoint_id")
-                .endRecord();
-
-        // Offset index: per-partition min/max offset and record count
-        OFFSET_INDEX_SCHEMA = SchemaBuilder.record("OffsetIndex")
-                .namespace("com.lineage")
-                .fields()
-                .requiredInt("kafka_partition")
-                .requiredLong("min_offset")
-                .requiredLong("max_offset")
-                .requiredLong("record_count")
-                .requiredLong("checkpoint_id")
-                .name("window_start").type(timestampMillis).noDefault()
                 .endRecord();
     }
 }
