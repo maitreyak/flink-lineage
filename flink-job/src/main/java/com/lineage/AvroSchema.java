@@ -17,6 +17,9 @@ public final class AvroSchema {
     /** Schema for the enriched record written to Parquet. */
     public static final Schema ENRICHED_EVENT_SCHEMA;
 
+    /** Schema for commit log entries written to Parquet. */
+    public static final Schema COMMIT_LOG_SCHEMA;
+
     static {
         // Input: uuid (string), timestamp (long/timestamp-millis)
         Schema timestampMillis = LogicalTypes.timestampMillis().addToSchema(Schema.create(Schema.Type.LONG));
@@ -38,6 +41,15 @@ public final class AvroSchema {
                 .requiredInt("kafka_partition")
                 .requiredLong("kafka_offset")
                 .requiredLong("checkpoint_id")
+                .endRecord();
+
+        // Commit log: checkpoint_id (long), s3_key (string), commit_timestamp (timestamp-millis)
+        COMMIT_LOG_SCHEMA = SchemaBuilder.record("CommitLogEntry")
+                .namespace("com.lineage")
+                .fields()
+                .requiredLong("checkpoint_id")
+                .requiredString("s3_key")
+                .name("commit_timestamp").type(timestampMillis).noDefault()
                 .endRecord();
     }
 }

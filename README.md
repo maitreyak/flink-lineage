@@ -7,7 +7,7 @@ Kafka-to-S3 pipeline that reads Avro messages from Kafka, enriches them with Kaf
 - Docker and Docker Compose
 - Java 11+
 - Maven 3.6+
-- jq (for querying commit log JSON)
+- DuckDB (for querying commit log Parquet files)
 
 ## Quick Start
 
@@ -40,11 +40,11 @@ Flink: EnrichFunction
 CommitLoggingFileSink (wraps FileSink)
   - Pre-commit topology: CommitLogExtractingOperator
     extracts (checkpoint_id, s3_key) from committable messages
-    writes JSON commit log on checkpoint completion
+    emits as side output → second transactional FileSink (Parquet)
     |
     v
 FileSink --> s3://flink-data/output/          (enriched data, partitioned by date/hour)
-         +-> s3://flink-data/commit-log/      (commit log mapping checkpoints to S3 files)
+FileSink --> s3://flink-data/commit-log/      (commit log Parquet, partitioned by checkpoint)
 ```
 
 ### Data Flow
@@ -52,7 +52,7 @@ FileSink --> s3://flink-data/output/          (enriched data, partitioned by dat
 - **Data generator**: Produces ~10 Avro messages/sec across 10 Kafka partitions
 - **Flink job**: Consumes from Kafka, enriches with metadata, writes Parquet to S3
 - **Data sink**: Full enriched records partitioned by `year=/month=/day=/hour=`
-- **Commit log**: JSON manifests mapping each checkpoint to its committed S3 data files
+- **Commit log**: Parquet files mapping each checkpoint to its committed S3 data files (transactional — rolls back with the data sink)
 
 ## Services
 
@@ -76,28 +76,17 @@ Schema: `uuid` (string), `timestamp` (long), `kafka_topic` (string), `kafka_part
 
 ### Commit Log Files
 
-Written to `s3://flink-data/commit-log/` per checkpoint:
+Written to `s3://flink-data/commit-log/` per checkpoint as Parquet files:
 
 ```
-commit-log/chk-1/subtask-0.json
-commit-log/chk-1/subtask-1.json
-commit-log/chk-2/subtask-0.json
+commit-log/chk-1/part-0-0.parquet
+commit-log/chk-2/part-0-0.parquet
 ...
 ```
 
-Each JSON file records which S3 data files were committed by a given checkpoint:
+Schema: `checkpoint_id` (long), `s3_key` (string), `commit_timestamp` (timestamp-millis)
 
-```json
-{
-  "checkpoint_id": 42,
-  "subtask_index": 0,
-  "committed_files": [
-    {"s3_key": "s3://flink-data/output/year=2026/.../part-abc-0", "timestamp": 1740581234567}
-  ]
-}
-```
-
-The commit log is written inside the pre-commit topology via `CommitLoggingFileSink`, which wraps `FileSink` and injects a `CommitLogExtractingOperator` into the committable stream. The entries are extracted from the actual `FileSinkCommittable` messages that flow through the pre-commit topology.
+The commit log is written by a second transactional `FileSink` inside the pre-commit topology. `CommitLogExtractingOperator` emits commit log records as side output, which are captured and written to Parquet. Both the data sink and commit log sink participate in Flink's two-phase commit — on rollback, both roll back (no orphaned commit log files).
 
 To query which files belong to a specific checkpoint:
 
@@ -106,8 +95,8 @@ To query which files belong to a specific checkpoint:
 docker compose exec minio mc cp --recursive local/flink-data/commit-log/ /tmp/cl/
 docker compose cp minio:/tmp/cl /tmp/commit-log
 
-# List files committed by checkpoint 5
-cat /tmp/commit-log/chk-5/subtask-*.json | jq '.committed_files[].s3_key'
+# Query with DuckDB
+duckdb -c "SELECT checkpoint_id, s3_key, commit_timestamp FROM read_parquet('/tmp/commit-log/chk-*/part-*.parquet') WHERE checkpoint_id = 5"
 ```
 
 ## Configuration
@@ -143,8 +132,9 @@ flink-lineage/
 │   ├── pom.xml
 │   └── src/main/java/com/lineage/
 │       ├── AvroSchema.java                      # Schema definitions (input, enriched)
-│       ├── CommitLogExtractingOperator.java     # Pre-commit topology operator for commit log
-│       ├── CommitLoggingFileSink.java           # FileSink wrapper injecting commit log operator
+│       ├── CommitLogExtractingOperator.java     # Pre-commit topology operator (side output)
+│       ├── CommitLogParquetWriterOperator.java  # Parquet writer for commit log records
+│       ├── CommitLoggingFileSink.java           # FileSink wrapper with commit log topology
 │       ├── EnrichFunction.java                  # Avro deserialization + Kafka metadata enrichment
 │       ├── EnrichedEvent.java                   # Enriched event POJO
 │       ├── InputEvent.java                      # Input event POJO
