@@ -76,7 +76,7 @@ public class LineageJob {
 
         CommitLoggingFileSink<GenericRecord> commitLoggingSink =
                 new CommitLoggingFileSink<>(fileSink, COMMIT_LOG_PATH);
-        enrichedStream.sinkTo(commitLoggingSink);
+        enrichedStream.sinkTo(commitLoggingSink).uid("ParquetFileSink");
 
         env.execute("Kafka-to-S3 Lineage Pipeline");
     }
