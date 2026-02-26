@@ -78,7 +78,7 @@ Written to `s3://flink-data/output/` with date-hour partitioning:
 output/year=2026/month=02/day=24/hour=20/part-*.parquet
 ```
 
-Schema: `uuid` (string), `timestamp` (long), `kafka_topic` (string), `kafka_partition` (int), `kafka_offset` (long)
+Schema: `uuid` (string), `timestamp` (long), `kafka_topic` (string), `kafka_partition` (int), `kafka_offset` (long), `checkpoint_id` (long)
 
 ### Offset Index Files
 
@@ -91,22 +91,31 @@ offset-index/chk-2/subtask-0.parquet
 ...
 ```
 
-Schema: `kafka_partition` (int), `min_offset` (long), `max_offset` (long), `record_count` (long), `window_start` (timestamp)
+Schema: `kafka_partition` (int), `min_offset` (long), `max_offset` (long), `record_count` (long), `checkpoint_id` (long), `window_start` (timestamp)
 
 Each file is ~1.6 KB. A new set of files is produced every checkpoint interval (60s).
 
 ## Gap Detection
 
-Query the offset index to detect dropped Kafka messages without scanning data files:
+Query the offset index to detect dropped Kafka messages without scanning data files. The query uses `checkpoint_id` to deduplicate overlapping windows that can occur after Flink recovery:
 
 ```sql
+-- Checkpoint-aware gap detection (deduplicated by checkpoint_id)
+WITH deduped AS (
+    SELECT kafka_partition, checkpoint_id,
+           min(min_offset) AS min_offset,
+           max(max_offset) AS max_offset,
+           sum(record_count) AS record_count
+    FROM read_parquet('offset-index/chk-*/*.parquet')
+    GROUP BY kafka_partition, checkpoint_id
+)
 SELECT kafka_partition,
        min(min_offset) AS first_offset,
        max(max_offset) AS last_offset,
        sum(record_count) AS total_rows,
        max(max_offset) - min(min_offset) + 1 AS expected_rows,
        max(max_offset) - min(min_offset) + 1 - sum(record_count) AS gaps
-FROM read_parquet('offset-index/chk-*/*.parquet')
+FROM deduped
 GROUP BY kafka_partition;
 ```
 
@@ -117,21 +126,46 @@ To run this locally after copying files from MinIO:
 docker compose exec minio mc cp --recursive local/flink-data/offset-index/ /tmp/oi/
 docker compose cp minio:/tmp/oi /tmp/offset-index
 
-# Run the gap detection query
+# Run the checkpoint-aware gap detection query
 duckdb -c "
+WITH deduped AS (
+    SELECT kafka_partition, checkpoint_id,
+           min(min_offset) AS min_offset,
+           max(max_offset) AS max_offset,
+           sum(record_count) AS record_count
+    FROM read_parquet('/tmp/offset-index/chk-*/*.parquet')
+    GROUP BY kafka_partition, checkpoint_id
+)
 SELECT kafka_partition,
        min(min_offset) AS first_offset,
        max(max_offset) AS last_offset,
        sum(record_count) AS total_rows,
        max(max_offset) - min(min_offset) + 1 AS expected_rows,
        max(max_offset) - min(min_offset) + 1 - sum(record_count) AS gaps
-FROM read_parquet('/tmp/offset-index/chk-*/*.parquet')
+FROM deduped
 GROUP BY kafka_partition
 ORDER BY kafka_partition;
 "
 ```
 
 A `gaps` value of 0 means no dropped messages for that partition.
+
+### Duplicate Detection
+
+After a recovery, the same offsets may appear under multiple checkpoint IDs. Use this query to find overlapping checkpoint windows:
+
+```sql
+SELECT a.kafka_partition,
+       a.checkpoint_id AS chk_a,
+       b.checkpoint_id AS chk_b,
+       greatest(a.min_offset, b.min_offset) AS overlap_start,
+       least(a.max_offset, b.max_offset) AS overlap_end
+FROM read_parquet('/tmp/offset-index/chk-*/*.parquet') a
+JOIN read_parquet('/tmp/offset-index/chk-*/*.parquet') b
+  ON a.kafka_partition = b.kafka_partition
+ AND a.checkpoint_id < b.checkpoint_id
+ AND a.max_offset >= b.min_offset;
+```
 
 ## Caveats
 
@@ -147,13 +181,13 @@ If S3/MinIO is unreachable during `notifyCheckpointComplete()`, the exception pr
 
 Index files are written in `notifyCheckpointComplete()` outside of Flink's transactional sink protocol. If a downstream operator fails after the index is written but before the checkpoint fully commits, Flink rolls back to the previous checkpoint. The data sink discards uncommitted files, but the **index file persists on S3** — referencing offsets that no longer appear in any data file.
 
-**Severity**: Medium. Gap detection may undercount gaps (false negatives) for the affected checkpoint window.
+**Severity**: Medium. Gap detection may undercount gaps (false negatives) for the affected checkpoint window. **Mitigated**: the `checkpoint_id` column lets you identify and exclude orphaned index records by filtering to only checkpoint IDs present in the data files.
 
 ### 3. Duplicate offset counts after recovery
 
 After a failure, Flink restores from the last successful checkpoint and replays Kafka records. The replayed window produces a new `chk-{id}` index with a new checkpoint ID but **overlapping offsets** with the orphaned index from the failed attempt. The gap detection query sums `record_count` across all files, so overlapping windows **double-count** offsets, potentially showing negative gap values.
 
-**Severity**: Medium. Can mask real gaps. Mitigated by cleaning up orphaned `chk-*` directories for checkpoints beyond the latest restored ID.
+**Severity**: Medium. **Resolved**: the `checkpoint_id` column in both data and index records lets the gap detection query group by checkpoint window, preventing double-counting of replayed offsets. See the checkpoint-aware gap detection and duplicate detection queries above.
 
 ### 4. Memory leak from abandoned checkpoints
 
@@ -177,7 +211,7 @@ The old FileSink participated in Flink's backpressure mechanism — slow S3 writ
 
 - Wrap the index write in a try/catch to log-and-skip on failure, decoupling it from the data path (addresses #1)
 - Write index files asynchronously in a background thread (addresses #1 and #6)
-- Include the checkpoint ID in index records and deduplicate in the gap detection query (addresses #3)
+- ~~Include the checkpoint ID in index records and deduplicate in the gap detection query (addresses #3)~~ — **Done**: `checkpoint_id` is now included in both enriched data and offset index records
 - Add a TTL or max-size bound to `pendingSnapshots` (addresses #4)
 
 ## Configuration

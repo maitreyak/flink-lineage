@@ -64,6 +64,9 @@ public class OffsetTrackingEnrichFunction
     private transient GenericDatumReader<GenericRecord> reader;
     private transient DecoderFactory decoderFactory;
 
+    /** Checkpoint ID from the most recent snapshotState call; attached to emitted records. */
+    private transient long currentCheckpointId;
+
     /** In-memory accumulators: partition -> [minOffset, maxOffset, count, windowStart] */
     private transient HashMap<Integer, long[]> partitionAccumulators;
 
@@ -111,6 +114,7 @@ public class OffsetTrackingEnrichFunction
                     .set("kafka_topic", record.topic())
                     .set("kafka_partition", record.partition())
                     .set("kafka_offset", record.offset())
+                    .set("checkpoint_id", currentCheckpointId)
                     .build();
 
             out.collect(enriched);
@@ -138,6 +142,7 @@ public class OffsetTrackingEnrichFunction
     @Override
     public void snapshotState(FunctionSnapshotContext context) throws Exception {
         long checkpointId = context.getCheckpointId();
+        currentCheckpointId = checkpointId;
 
         // Serialize current accumulators
         checkpointState.clear();
@@ -193,7 +198,7 @@ public class OffsetTrackingEnrichFunction
         String path = String.format("%s/chk-%d/subtask-%d.parquet",
                 offsetIndexBasePath, checkpointId, subtaskIndex);
 
-        writeParquetIndex(path, snapshot);
+        writeParquetIndex(path, snapshot, checkpointId);
         LOG.info("Wrote offset index: {} ({} partitions)", path, snapshot.size());
     }
 
@@ -204,7 +209,7 @@ public class OffsetTrackingEnrichFunction
 
     // ---- Parquet writing ----
 
-    private void writeParquetIndex(String path, HashMap<Integer, long[]> snapshot) throws IOException {
+    private void writeParquetIndex(String path, HashMap<Integer, long[]> snapshot, long checkpointId) throws IOException {
         // Use Flink's FileSystem (which has S3 plugin access) via a custom OutputFile
         FlinkOutputFile outputFile = new FlinkOutputFile(new Path(path));
 
@@ -224,6 +229,7 @@ public class OffsetTrackingEnrichFunction
                         .set("min_offset", acc[IDX_MIN_OFFSET])
                         .set("max_offset", acc[IDX_MAX_OFFSET])
                         .set("record_count", acc[IDX_COUNT])
+                        .set("checkpoint_id", checkpointId)
                         .set("window_start", acc[IDX_WINDOW_START])
                         .build();
 

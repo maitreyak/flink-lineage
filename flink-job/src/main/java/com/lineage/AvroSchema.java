@@ -40,6 +40,7 @@ public final class AvroSchema {
                 .requiredString("kafka_topic")
                 .requiredInt("kafka_partition")
                 .requiredLong("kafka_offset")
+                .requiredLong("checkpoint_id")
                 .endRecord();
 
         // Offset index: per-partition min/max offset and record count
@@ -50,6 +51,7 @@ public final class AvroSchema {
                 .requiredLong("min_offset")
                 .requiredLong("max_offset")
                 .requiredLong("record_count")
+                .requiredLong("checkpoint_id")
                 .name("window_start").type(timestampMillis).noDefault()
                 .endRecord();
     }
