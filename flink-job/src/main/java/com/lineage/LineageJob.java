@@ -41,6 +41,8 @@ public class LineageJob {
             "OUTPUT_PATH", "s3://flink-data/output");
     private static final String OFFSET_INDEX_PATH = System.getenv().getOrDefault(
             "OFFSET_INDEX_PATH", "s3://flink-data/offset-index");
+    private static final String COMMIT_LOG_PATH = System.getenv().getOrDefault(
+            "COMMIT_LOG_PATH", "s3://flink-data/commit-log");
 
     public static void main(String[] args) throws Exception {
         final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
@@ -74,7 +76,9 @@ public class LineageJob {
                 .withRollingPolicy(OnCheckpointRollingPolicy.build())
                 .build();
 
-        enrichedStream.sinkTo(fileSink);
+        CommitLoggingFileSink<GenericRecord> commitLoggingSink =
+                new CommitLoggingFileSink<>(fileSink, COMMIT_LOG_PATH);
+        enrichedStream.sinkTo(commitLoggingSink);
 
         env.execute("Kafka-to-S3 Lineage Pipeline");
     }

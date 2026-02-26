@@ -39,8 +39,15 @@ Flink: OffsetTrackingEnrichFunction
   - Writes Parquet index files on checkpoint completion (CheckpointListener)
     |
     v
+CommitLoggingFileSink (wraps FileSink)
+  - Pre-commit topology: CommitLogExtractingOperator
+    extracts (checkpoint_id, s3_key) from committable messages
+    writes JSON commit log on checkpoint completion
+    |
+    v
 FileSink --> s3://flink-data/output/          (enriched data, partitioned by date/hour)
          +-> s3://flink-data/offset-index/    (index files written directly on checkpoint)
+         +-> s3://flink-data/commit-log/      (commit log mapping checkpoints to S3 files)
 ```
 
 ### Data Flow
@@ -94,6 +101,42 @@ offset-index/chk-2/subtask-0.parquet
 Schema: `kafka_partition` (int), `min_offset` (long), `max_offset` (long), `record_count` (long), `checkpoint_id` (long), `window_start` (timestamp)
 
 Each file is ~1.6 KB. A new set of files is produced every checkpoint interval (60s).
+
+### Commit Log Files
+
+Written to `s3://flink-data/commit-log/` per checkpoint:
+
+```
+commit-log/chk-1/subtask-0.json
+commit-log/chk-1/subtask-1.json
+commit-log/chk-2/subtask-0.json
+...
+```
+
+Each JSON file records which S3 data files were committed by a given checkpoint:
+
+```json
+{
+  "checkpoint_id": 42,
+  "subtask_index": 0,
+  "committed_files": [
+    {"s3_key": "s3://flink-data/output/year=2026/.../part-abc-0", "timestamp": 1740581234567}
+  ]
+}
+```
+
+The commit log is written inside the pre-commit topology via `CommitLoggingFileSink`, which wraps `FileSink` and injects a `CommitLogExtractingOperator` into the committable stream. Unlike the offset index (which uses `CheckpointListener` outside the transactional protocol), the commit log entries are extracted from the actual `FileSinkCommittable` messages that flow through the pre-commit topology.
+
+To query which files belong to a specific checkpoint:
+
+```bash
+# Copy commit log files from MinIO
+docker compose exec minio mc cp --recursive local/flink-data/commit-log/ /tmp/cl/
+docker compose cp minio:/tmp/cl /tmp/commit-log
+
+# List files committed by checkpoint 5
+cat /tmp/commit-log/chk-5/subtask-*.json | jq '.committed_files[].s3_key'
+```
 
 ## Gap Detection
 
@@ -224,6 +267,7 @@ Environment variables (set in `docker-compose.yml`):
 | `KAFKA_TOPIC` | `lineage-input` | Source Kafka topic |
 | `OUTPUT_PATH` | `s3://flink-data/output` | Data sink path |
 | `OFFSET_INDEX_PATH` | `s3://flink-data/offset-index` | Offset index base path |
+| `COMMIT_LOG_PATH` | `s3://flink-data/commit-log` | Commit log base path |
 
 Flink settings are in `flink-conf/flink-conf.yaml`:
 - Checkpointing: 60s interval, EXACTLY_ONCE
@@ -247,6 +291,8 @@ flink-lineage/
 │   ├── pom.xml
 │   └── src/main/java/com/lineage/
 │       ├── AvroSchema.java                      # Schema definitions (input, enriched, offset index)
+│       ├── CommitLogExtractingOperator.java     # Pre-commit topology operator for commit log
+│       ├── CommitLoggingFileSink.java           # FileSink wrapper injecting commit log operator
 │       ├── EnrichedEvent.java                   # Enriched event POJO
 │       ├── InputEvent.java                      # Input event POJO
 │       ├── LineageJob.java                      # Main Flink job (source, sink, wiring)
