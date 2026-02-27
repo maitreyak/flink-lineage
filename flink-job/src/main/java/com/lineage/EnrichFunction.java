@@ -6,11 +6,13 @@ import org.apache.avro.generic.GenericDatumReader;
 import org.apache.avro.io.BinaryDecoder;
 import org.apache.avro.io.DecoderFactory;
 
+import org.apache.flink.formats.avro.typeutils.GenericRecordAvroTypeInfo;
 import org.apache.flink.runtime.state.FunctionInitializationContext;
 import org.apache.flink.runtime.state.FunctionSnapshotContext;
 import org.apache.flink.streaming.api.checkpoint.CheckpointedFunction;
 import org.apache.flink.streaming.api.functions.ProcessFunction;
 import org.apache.flink.util.Collector;
+import org.apache.flink.util.OutputTag;
 
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 
@@ -29,6 +31,9 @@ public class EnrichFunction
 
     private static final long serialVersionUID = 1L;
     private static final Logger LOG = LoggerFactory.getLogger(EnrichFunction.class);
+
+    public static final OutputTag<GenericRecord> DROPPED_TAG =
+            new OutputTag<>("dropped", new GenericRecordAvroTypeInfo(AvroSchema.ENRICHED_EVENT_SCHEMA));
 
     private transient GenericDatumReader<GenericRecord> reader;
     private transient DecoderFactory decoderFactory;
@@ -62,7 +67,12 @@ public class EnrichFunction
                     .set("checkpoint_id", currentCheckpointId)
                     .build();
 
-            out.collect(enriched);
+            // Drop offsets divisible by 10 to test gap detection
+            if (record.offset() % 10 != 0) {
+                out.collect(enriched);
+            } else {
+                ctx.output(DROPPED_TAG, enriched);
+            }
         } catch (IOException e) {
             LOG.error("Failed to deserialize Avro record from partition={} offset={}",
                     record.partition(), record.offset(), e);

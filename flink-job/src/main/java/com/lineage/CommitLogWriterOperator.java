@@ -33,12 +33,14 @@ public class CommitLogWriterOperator
     private static final Logger LOG = LoggerFactory.getLogger(CommitLogWriterOperator.class);
 
     private final String commitLogBasePath;
+    private final String filePrefix;
 
     /** Records buffered per checkpoint, written on checkpoint completion. */
     private transient ConcurrentHashMap<Long, List<GenericRecord>> pendingRecords;
 
-    public CommitLogWriterOperator(String commitLogBasePath) {
+    public CommitLogWriterOperator(String commitLogBasePath, String filePrefix) {
         this.commitLogBasePath = commitLogBasePath;
+        this.filePrefix = filePrefix;
     }
 
     @Override
@@ -83,8 +85,8 @@ public class CommitLogWriterOperator
 
     private void writeCsv(long checkpointId, List<GenericRecord> records) throws IOException {
         int subtaskIndex = getRuntimeContext().getTaskInfo().getIndexOfThisSubtask();
-        String filePath = String.format("%s/chk-%d/subtask-%d.csv",
-                commitLogBasePath, checkpointId, subtaskIndex);
+        String filePath = String.format("%s/chk-%d/%s-subtask-%d.csv",
+                commitLogBasePath, checkpointId, filePrefix, subtaskIndex);
 
         StringBuilder csv = new StringBuilder();
         csv.append("checkpoint_id,s3_key,commit_timestamp\n");

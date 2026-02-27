@@ -47,10 +47,16 @@ public class CommitLoggingFileSink<IN>
 
     private final FileSink<IN> delegate;
     private final String commitLogBasePath;
+    private final String sinkName;
 
     public CommitLoggingFileSink(FileSink<IN> delegate, String commitLogBasePath) {
+        this(delegate, commitLogBasePath, "");
+    }
+
+    public CommitLoggingFileSink(FileSink<IN> delegate, String commitLogBasePath, String sinkName) {
         this.delegate = delegate;
         this.commitLogBasePath = commitLogBasePath;
+        this.sinkName = sinkName;
     }
 
     // --- Sink ---
@@ -122,7 +128,7 @@ public class CommitLoggingFileSink<IN>
                                 delegateStream.getType(),
                                 new CommitLogExtractingOperator())
                         .setParallelism(delegateStream.getParallelism())
-                        .uid("CommitLogExtractor");
+                        .uid("CommitLogExtractor" + sinkName);
 
         // 3. Capture the side output and write CSV via .transform()
         //    (NOT .sinkTo() — that triggers nested SinkExpander expansion and CME)
@@ -133,9 +139,10 @@ public class CommitLoggingFileSink<IN>
                 .transform(
                         "CommitLogWriter",
                         new GenericRecordAvroTypeInfo(AvroSchema.COMMIT_LOG_SCHEMA),
-                        new CommitLogWriterOperator(commitLogBasePath))
+                        new CommitLogWriterOperator(commitLogBasePath,
+                                sinkName.isEmpty() ? "output" : sinkName.replaceFirst("^-", "").toLowerCase()))
                 .setParallelism(result.getParallelism())
-                .uid("CommitLogWriter");
+                .uid("CommitLogWriter" + sinkName);
 
         // 4. Return main committable stream for the data sink's committer
         return result;

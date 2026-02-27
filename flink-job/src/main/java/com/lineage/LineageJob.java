@@ -12,6 +12,7 @@ import org.apache.flink.connector.kafka.source.reader.deserializer.KafkaRecordDe
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.formats.parquet.avro.AvroParquetWriters;
 import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.sink.filesystem.bucketassigners.DateTimeBucketAssigner;
 import org.apache.flink.streaming.api.functions.sink.filesystem.rollingpolicies.OnCheckpointRollingPolicy;
@@ -41,6 +42,8 @@ public class LineageJob {
             "OUTPUT_PATH", "s3://flink-data/output");
     private static final String COMMIT_LOG_PATH = System.getenv().getOrDefault(
             "COMMIT_LOG_PATH", "s3://flink-data/commit-log");
+    private static final String DROPPED_PATH = System.getenv().getOrDefault(
+            "DROPPED_PATH", "s3://flink-data/dropped");
 
     public static void main(String[] args) throws Exception {
         final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
@@ -61,22 +64,41 @@ public class LineageJob {
                 "Kafka Source");
 
         // Deserialize Avro + enrich with Kafka metadata
-        DataStream<GenericRecord> enrichedStream = kafkaStream
+        SingleOutputStreamOperator<GenericRecord> enrichedStream = kafkaStream
                 .process(new EnrichFunction())
                 .returns(new GenericRecordAvroTypeInfo(AvroSchema.ENRICHED_EVENT_SCHEMA));
 
         // File sink: Parquet with date-time bucket assigner
+        DateTimeBucketAssigner<GenericRecord> bucketAssigner =
+                new DateTimeBucketAssigner<>("'year='yyyy'/month='MM'/day='dd'/hour='HH", ZoneOffset.UTC);
+
         FileSink<GenericRecord> fileSink = FileSink
                 .forBulkFormat(
                         new Path(OUTPUT_PATH),
                         AvroParquetWriters.forGenericRecord(AvroSchema.ENRICHED_EVENT_SCHEMA))
-                .withBucketAssigner(new DateTimeBucketAssigner<>("'year='yyyy'/month='MM'/day='dd'/hour='HH", ZoneOffset.UTC))
+                .withBucketAssigner(bucketAssigner)
                 .withRollingPolicy(OnCheckpointRollingPolicy.build())
                 .build();
 
         CommitLoggingFileSink<GenericRecord> commitLoggingSink =
                 new CommitLoggingFileSink<>(fileSink, COMMIT_LOG_PATH);
         enrichedStream.sinkTo(commitLoggingSink).uid("ParquetFileSink");
+
+        // Dropped records sink: same Parquet format + partitioning as main sink
+        DataStream<GenericRecord> droppedStream =
+                enrichedStream.getSideOutput(EnrichFunction.DROPPED_TAG);
+
+        FileSink<GenericRecord> droppedFileSink = FileSink
+                .forBulkFormat(
+                        new Path(DROPPED_PATH),
+                        AvroParquetWriters.forGenericRecord(AvroSchema.ENRICHED_EVENT_SCHEMA))
+                .withBucketAssigner(new DateTimeBucketAssigner<>("'year='yyyy'/month='MM'/day='dd'/hour='HH", ZoneOffset.UTC))
+                .withRollingPolicy(OnCheckpointRollingPolicy.build())
+                .build();
+
+        CommitLoggingFileSink<GenericRecord> droppedCommitLoggingSink =
+                new CommitLoggingFileSink<>(droppedFileSink, COMMIT_LOG_PATH, "-Dropped");
+        droppedStream.sinkTo(droppedCommitLoggingSink).uid("DroppedRecordsSink");
 
         env.execute("Kafka-to-S3 Lineage Pipeline");
     }
