@@ -69,7 +69,7 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       KAFKA_TOPIC: lineage-input
       OUTPUT_PATH: s3://flink-data/output
-      COMMIT_LOG_PATH: s3://flink-data/commit-log
+      WRITE_AHEAD_COMMIT_LOG_PATH: s3://flink-data/write-ahead-commit-log
       AWS_ACCESS_KEY_ID: minioadmin
       AWS_SECRET_ACCESS_KEY: minioadmin
 
@@ -87,7 +87,7 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       KAFKA_TOPIC: lineage-input
       OUTPUT_PATH: s3://flink-data/output
-      COMMIT_LOG_PATH: s3://flink-data/commit-log
+      WRITE_AHEAD_COMMIT_LOG_PATH: s3://flink-data/write-ahead-commit-log
       AWS_ACCESS_KEY_ID: minioadmin
       AWS_SECRET_ACCESS_KEY: minioadmin
 

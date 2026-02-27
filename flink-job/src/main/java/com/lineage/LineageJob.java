@@ -40,8 +40,8 @@ public class LineageJob {
             "KAFKA_TOPIC", "lineage-input");
     private static final String OUTPUT_PATH = System.getenv().getOrDefault(
             "OUTPUT_PATH", "s3://flink-data/output");
-    private static final String COMMIT_LOG_PATH = System.getenv().getOrDefault(
-            "COMMIT_LOG_PATH", "s3://flink-data/commit-log");
+    private static final String WRITE_AHEAD_COMMIT_LOG_PATH = System.getenv().getOrDefault(
+            "WRITE_AHEAD_COMMIT_LOG_PATH", "s3://flink-data/write-ahead-commit-log");
     private static final String DROPPED_PATH = System.getenv().getOrDefault(
             "DROPPED_PATH", "s3://flink-data/dropped");
 
@@ -80,9 +80,9 @@ public class LineageJob {
                 .withRollingPolicy(OnCheckpointRollingPolicy.build())
                 .build();
 
-        CommitLoggingFileSink<GenericRecord> commitLoggingSink =
-                new CommitLoggingFileSink<>(fileSink, COMMIT_LOG_PATH);
-        enrichedStream.sinkTo(commitLoggingSink).uid("ParquetFileSink");
+        WriteAheadCommitLogSink<GenericRecord> walSink =
+                new WriteAheadCommitLogSink<>(fileSink, WRITE_AHEAD_COMMIT_LOG_PATH);
+        enrichedStream.sinkTo(walSink).uid("ParquetFileSink");
 
         // Dropped records sink: same Parquet format + partitioning as main sink
         DataStream<GenericRecord> droppedStream =
@@ -96,9 +96,9 @@ public class LineageJob {
                 .withRollingPolicy(OnCheckpointRollingPolicy.build())
                 .build();
 
-        CommitLoggingFileSink<GenericRecord> droppedCommitLoggingSink =
-                new CommitLoggingFileSink<>(droppedFileSink, COMMIT_LOG_PATH, "-Dropped");
-        droppedStream.sinkTo(droppedCommitLoggingSink).uid("DroppedRecordsSink");
+        WriteAheadCommitLogSink<GenericRecord> droppedWalSink =
+                new WriteAheadCommitLogSink<>(droppedFileSink, WRITE_AHEAD_COMMIT_LOG_PATH, "-Dropped");
+        droppedStream.sinkTo(droppedWalSink).uid("DroppedRecordsSink");
 
         env.execute("Kafka-to-S3 Lineage Pipeline");
     }

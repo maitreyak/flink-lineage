@@ -21,13 +21,14 @@ import java.io.IOException;
 import java.util.Collection;
 
 /**
- * Wrapper around {@link FileSink} that injects a {@link CommitLogExtractingOperator}
- * into the pre-commit topology. The operator eagerly writes CSV commit log entries
- * in {@code processElement()}, making it a write-ahead log.
+ * Wrapper around {@link FileSink} that injects a {@link WriteAheadCommitLogOperator}
+ * into the pre-commit topology. The operator eagerly writes CSV write-ahead commit
+ * log entries in {@code processElement()}, ensuring entries are durable before the
+ * checkpoint completes.
  *
  * @param <IN> Type of elements written to the sink
  */
-public class CommitLoggingFileSink<IN>
+public class WriteAheadCommitLogSink<IN>
         implements Sink<IN>,
                    SupportsWriterState<IN, FileWriterBucketState>,
                    SupportsCommitter<FileSinkCommittable>,
@@ -41,11 +42,11 @@ public class CommitLoggingFileSink<IN>
     private final String commitLogBasePath;
     private final String sinkName;
 
-    public CommitLoggingFileSink(FileSink<IN> delegate, String commitLogBasePath) {
+    public WriteAheadCommitLogSink(FileSink<IN> delegate, String commitLogBasePath) {
         this(delegate, commitLogBasePath, "");
     }
 
-    public CommitLoggingFileSink(FileSink<IN> delegate, String commitLogBasePath, String sinkName) {
+    public WriteAheadCommitLogSink(FileSink<IN> delegate, String commitLogBasePath, String sinkName) {
         this.delegate = delegate;
         this.commitLogBasePath = commitLogBasePath;
         this.sinkName = sinkName;
@@ -112,15 +113,15 @@ public class CommitLoggingFileSink<IN>
         DataStream<CommittableMessage<FileSinkCommittable>> delegateStream =
                 delegate.addPreCommitTopology(committableStream);
 
-        // 2. Transform with CommitLogExtractingOperator (eagerly writes CSV commit log)
+        // 2. Transform with WriteAheadCommitLogOperator (eagerly writes CSV)
         String filePrefix = sinkName.isEmpty() ? "output" : sinkName.replaceFirst("^-", "").toLowerCase();
 
         return delegateStream
                 .transform(
-                        "CommitLogExtractor",
+                        "WriteAheadCommitLog",
                         delegateStream.getType(),
-                        new CommitLogExtractingOperator(commitLogBasePath, filePrefix))
+                        new WriteAheadCommitLogOperator(commitLogBasePath, filePrefix))
                 .setParallelism(delegateStream.getParallelism())
-                .uid("CommitLogExtractor" + sinkName);
+                .uid("WriteAheadCommitLog" + sinkName);
     }
 }

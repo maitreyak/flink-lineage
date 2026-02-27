@@ -17,34 +17,34 @@ import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 
 /**
- * Stateless operator in the FileSink pre-commit topology that extracts
+ * Operator in the FileSink pre-commit topology that extracts
  * (checkpoint_id, s3_key) pairs from committable messages and writes them
- * eagerly as CSV files to the commit log path.
+ * eagerly as CSV files to the write-ahead commit log path.
  *
- * <p>Writing happens in {@code processElement()}, making the commit log a
- * write-ahead log — entries are durable before the checkpoint completes.
- * No buffering, no state, no {@code notifyCheckpointComplete} dependency.
+ * <p>Writing happens in {@code processElement()}, making entries durable
+ * before the checkpoint completes. No buffering, no state, no
+ * {@code notifyCheckpointComplete} dependency.
  *
- * <p>Tradeoff: the commit log may contain entries for failed checkpoints.
- * Consumers filter by checking if the referenced s3_key exists (uncommitted
- * files stay {@code .inprogress} and get cleaned up).
+ * <p>Tradeoff: the write-ahead commit log may contain entries for failed
+ * checkpoints. Consumers filter by checking if the referenced s3_key exists
+ * (uncommitted files stay {@code .inprogress} and get cleaned up).
  *
  * <p>All committable messages are forwarded unchanged on the main output.
  */
-public class CommitLogExtractingOperator
+public class WriteAheadCommitLogOperator
         extends AbstractStreamOperator<CommittableMessage<FileSinkCommittable>>
         implements OneInputStreamOperator<CommittableMessage<FileSinkCommittable>,
                                           CommittableMessage<FileSinkCommittable>> {
 
     private static final long serialVersionUID = 1L;
-    private static final Logger LOG = LoggerFactory.getLogger(CommitLogExtractingOperator.class);
+    private static final Logger LOG = LoggerFactory.getLogger(WriteAheadCommitLogOperator.class);
 
     private final String commitLogBasePath;
     private final String filePrefix;
 
     private transient int subtaskIndex;
 
-    public CommitLogExtractingOperator(String commitLogBasePath, String filePrefix) {
+    public WriteAheadCommitLogOperator(String commitLogBasePath, String filePrefix) {
         this.commitLogBasePath = commitLogBasePath;
         this.filePrefix = filePrefix;
     }
@@ -73,7 +73,7 @@ public class CommitLogExtractingOperator
                     long commitTimestamp = System.currentTimeMillis();
 
                     writeCsv(checkpointId, s3Key, commitTimestamp);
-                    LOG.info("Wrote commit log CSV: checkpoint={} s3_key={}", checkpointId, s3Key);
+                    LOG.info("Wrote write-ahead commit log: checkpoint={} s3_key={}", checkpointId, s3Key);
                 }
             }
         }
