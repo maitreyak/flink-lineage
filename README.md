@@ -37,7 +37,7 @@ Flink: EnrichFunction
   - Deserializes Avro, adds kafka_topic/partition/offset
     |
     v
-WriteAheadCommitLogSink (wraps FileSink)
+WriteAheadCommitLogFileSink (wraps FileSink)
   - Pre-commit topology: WriteAheadCommitLogOperator
     extracts (checkpoint_id, s3_key) from committable messages
     writes CSV write-ahead commit log eagerly in processElement()
@@ -134,7 +134,7 @@ flink-lineage/
 │   └── src/main/java/com/lineage/
 │       ├── AvroSchema.java                        # Schema definitions (input, enriched)
 │       ├── WriteAheadCommitLogOperator.java       # Pre-commit operator (eager CSV write-ahead commit log)
-│       ├── WriteAheadCommitLogSink.java           # FileSink wrapper with write-ahead commit log topology
+│       ├── WriteAheadCommitLogFileSink.java        # FileSink wrapper with write-ahead commit log topology
 │       ├── EnrichFunction.java                    # Avro deserialization + Kafka metadata enrichment
 │       ├── EnrichedEvent.java                     # Enriched event POJO
 │       ├── InputEvent.java                        # Input event POJO
