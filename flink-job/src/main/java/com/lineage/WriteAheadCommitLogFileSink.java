@@ -28,7 +28,7 @@ import java.util.Collection;
  *
  * @param <IN> Type of elements written to the sink
  */
-public class WriteAheadCommitLogSink<IN>
+public class WriteAheadCommitLogFileSink<IN>
         implements Sink<IN>,
                    SupportsWriterState<IN, FileWriterBucketState>,
                    SupportsCommitter<FileSinkCommittable>,
@@ -42,11 +42,11 @@ public class WriteAheadCommitLogSink<IN>
     private final String commitLogBasePath;
     private final String sinkName;
 
-    public WriteAheadCommitLogSink(FileSink<IN> delegate, String commitLogBasePath) {
+    public WriteAheadCommitLogFileSink(FileSink<IN> delegate, String commitLogBasePath) {
         this(delegate, commitLogBasePath, "");
     }
 
-    public WriteAheadCommitLogSink(FileSink<IN> delegate, String commitLogBasePath, String sinkName) {
+    public WriteAheadCommitLogFileSink(FileSink<IN> delegate, String commitLogBasePath, String sinkName) {
         this.delegate = delegate;
         this.commitLogBasePath = commitLogBasePath;
         this.sinkName = sinkName;

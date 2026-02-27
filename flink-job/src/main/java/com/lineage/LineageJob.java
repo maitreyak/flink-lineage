@@ -80,8 +80,8 @@ public class LineageJob {
                 .withRollingPolicy(OnCheckpointRollingPolicy.build())
                 .build();
 
-        WriteAheadCommitLogSink<GenericRecord> walSink =
-                new WriteAheadCommitLogSink<>(fileSink, WRITE_AHEAD_COMMIT_LOG_PATH);
+        WriteAheadCommitLogFileSink<GenericRecord> walSink =
+                new WriteAheadCommitLogFileSink<>(fileSink, WRITE_AHEAD_COMMIT_LOG_PATH);
         enrichedStream.sinkTo(walSink).uid("ParquetFileSink");
 
         // Dropped records sink: same Parquet format + partitioning as main sink
@@ -96,8 +96,8 @@ public class LineageJob {
                 .withRollingPolicy(OnCheckpointRollingPolicy.build())
                 .build();
 
-        WriteAheadCommitLogSink<GenericRecord> droppedWalSink =
-                new WriteAheadCommitLogSink<>(droppedFileSink, WRITE_AHEAD_COMMIT_LOG_PATH, "-Dropped");
+        WriteAheadCommitLogFileSink<GenericRecord> droppedWalSink =
+                new WriteAheadCommitLogFileSink<>(droppedFileSink, WRITE_AHEAD_COMMIT_LOG_PATH, "-Dropped");
         droppedStream.sinkTo(droppedWalSink).uid("DroppedRecordsSink");
 
         env.execute("Kafka-to-S3 Lineage Pipeline");
