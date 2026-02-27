@@ -124,18 +124,18 @@ public class CommitLoggingFileSink<IN>
                         .setParallelism(delegateStream.getParallelism())
                         .uid("CommitLogExtractor");
 
-        // 3. Capture the side output and write Parquet via .transform()
+        // 3. Capture the side output and write CSV via .transform()
         //    (NOT .sinkTo() — that triggers nested SinkExpander expansion and CME)
         DataStream<GenericRecord> commitLogStream =
                 result.getSideOutput(CommitLogExtractingOperator.COMMIT_LOG_TAG);
 
         commitLogStream
                 .transform(
-                        "CommitLogParquetWriter",
+                        "CommitLogWriter",
                         new GenericRecordAvroTypeInfo(AvroSchema.COMMIT_LOG_SCHEMA),
-                        new CommitLogParquetWriterOperator(commitLogBasePath))
+                        new CommitLogWriterOperator(commitLogBasePath))
                 .setParallelism(result.getParallelism())
-                .uid("CommitLogParquetWriter");
+                .uid("CommitLogWriter");
 
         // 4. Return main committable stream for the data sink's committer
         return result;

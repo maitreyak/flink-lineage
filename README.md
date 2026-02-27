@@ -7,7 +7,7 @@ Kafka-to-S3 pipeline that reads Avro messages from Kafka, enriches them with Kaf
 - Docker and Docker Compose
 - Java 11+
 - Maven 3.6+
-- DuckDB (for querying commit log Parquet files)
+- Standard Unix tools (for querying commit log CSV files)
 
 ## Quick Start
 
@@ -44,7 +44,7 @@ CommitLoggingFileSink (wraps FileSink)
     |
     v
 FileSink --> s3://flink-data/output/          (enriched data, partitioned by date/hour)
-FileSink --> s3://flink-data/commit-log/      (commit log Parquet, partitioned by checkpoint)
+         +-> s3://flink-data/commit-log/      (commit log CSV, partitioned by checkpoint)
 ```
 
 ### Data Flow
@@ -76,17 +76,18 @@ Schema: `uuid` (string), `timestamp` (long), `kafka_topic` (string), `kafka_part
 
 ### Commit Log Files
 
-Written to `s3://flink-data/commit-log/` per checkpoint as Parquet files:
+Written to `s3://flink-data/commit-log/` per checkpoint as CSV files:
 
 ```
-commit-log/chk-1/part-0-0.parquet
-commit-log/chk-2/part-0-0.parquet
+commit-log/chk-1/subtask-0.csv
+commit-log/chk-1/subtask-1.csv
+commit-log/chk-2/subtask-0.csv
 ...
 ```
 
-Schema: `checkpoint_id` (long), `s3_key` (string), `commit_timestamp` (timestamp-millis)
+Columns: `checkpoint_id`, `s3_key`, `commit_timestamp`
 
-The commit log is written by a second transactional `FileSink` inside the pre-commit topology. `CommitLogExtractingOperator` emits commit log records as side output, which are captured and written to Parquet. Both the data sink and commit log sink participate in Flink's two-phase commit — on rollback, both roll back (no orphaned commit log files).
+The commit log is written inside the pre-commit topology. `CommitLogExtractingOperator` emits commit log records as side output, which are captured by `CommitLogWriterOperator` and written as CSV on checkpoint completion.
 
 To query which files belong to a specific checkpoint:
 
@@ -95,8 +96,8 @@ To query which files belong to a specific checkpoint:
 docker compose exec minio mc cp --recursive local/flink-data/commit-log/ /tmp/cl/
 docker compose cp minio:/tmp/cl /tmp/commit-log
 
-# Query with DuckDB
-duckdb -c "SELECT checkpoint_id, s3_key, commit_timestamp FROM read_parquet('/tmp/commit-log/chk-*/part-*.parquet') WHERE checkpoint_id = 5"
+# List files committed by checkpoint 5
+cat /tmp/commit-log/chk-5/subtask-*.csv
 ```
 
 ## Configuration
@@ -133,7 +134,7 @@ flink-lineage/
 │   └── src/main/java/com/lineage/
 │       ├── AvroSchema.java                      # Schema definitions (input, enriched)
 │       ├── CommitLogExtractingOperator.java     # Pre-commit topology operator (side output)
-│       ├── CommitLogParquetWriterOperator.java  # Parquet writer for commit log records
+│       ├── CommitLogWriterOperator.java          # CSV writer for commit log records
 │       ├── CommitLoggingFileSink.java           # FileSink wrapper with commit log topology
 │       ├── EnrichFunction.java                  # Avro deserialization + Kafka metadata enrichment
 │       ├── EnrichedEvent.java                   # Enriched event POJO
