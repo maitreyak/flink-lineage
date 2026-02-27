@@ -40,7 +40,7 @@ Flink: EnrichFunction
 CommitLoggingFileSink (wraps FileSink)
   - Pre-commit topology: CommitLogExtractingOperator
     extracts (checkpoint_id, s3_key) from committable messages
-    emits as side output → second transactional FileSink (Parquet)
+    writes CSV commit log eagerly (write-ahead log)
     |
     v
 FileSink --> s3://flink-data/output/          (enriched data, partitioned by date/hour)
@@ -52,7 +52,7 @@ FileSink --> s3://flink-data/output/          (enriched data, partitioned by dat
 - **Data generator**: Produces ~10 Avro messages/sec across 10 Kafka partitions
 - **Flink job**: Consumes from Kafka, enriches with metadata, writes Parquet to S3
 - **Data sink**: Full enriched records partitioned by `year=/month=/day=/hour=`
-- **Commit log**: Parquet files mapping each checkpoint to its committed S3 data files (transactional — rolls back with the data sink)
+- **Commit log**: CSV files mapping each checkpoint to its committed S3 data files (write-ahead — written eagerly in `processElement()` before checkpoint completes; may contain entries for failed checkpoints, consumers filter by checking if the referenced s3_key exists)
 
 ## Services
 
@@ -87,7 +87,7 @@ commit-log/chk-2/subtask-0.csv
 
 Columns: `checkpoint_id`, `s3_key`, `commit_timestamp`
 
-The commit log is written inside the pre-commit topology. `CommitLogExtractingOperator` emits commit log records as side output, which are captured by `CommitLogWriterOperator` and written as CSV on checkpoint completion.
+The commit log is a write-ahead log written inside the pre-commit topology. `CommitLogExtractingOperator` eagerly writes CSV files in `processElement()` before the checkpoint completes, ensuring entries are durable even if the job crashes before `notifyCheckpointComplete`. Entries for failed checkpoints may exist; consumers filter by checking that the referenced `s3_key` is a finalized file (uncommitted files stay `.inprogress` and get cleaned up).
 
 To query which files belong to a specific checkpoint:
 
@@ -133,8 +133,7 @@ flink-lineage/
 │   ├── pom.xml
 │   └── src/main/java/com/lineage/
 │       ├── AvroSchema.java                      # Schema definitions (input, enriched)
-│       ├── CommitLogExtractingOperator.java     # Pre-commit topology operator (side output)
-│       ├── CommitLogWriterOperator.java          # CSV writer for commit log records
+│       ├── CommitLogExtractingOperator.java     # Pre-commit operator (eager CSV write-ahead log)
 │       ├── CommitLoggingFileSink.java           # FileSink wrapper with commit log topology
 │       ├── EnrichFunction.java                  # Avro deserialization + Kafka metadata enrichment
 │       ├── EnrichedEvent.java                   # Enriched event POJO
