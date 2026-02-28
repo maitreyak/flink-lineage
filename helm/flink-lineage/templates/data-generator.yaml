@@ -1,0 +1,34 @@
+{{- if .Values.dataGenerator.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "flink-lineage.fullname" . }}-data-generator
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flink-lineage.labels" . | nindent 4 }}
+    app.kubernetes.io/component: data-generator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "flink-lineage.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: data-generator
+  template:
+    metadata:
+      labels:
+        {{- include "flink-lineage.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: data-generator
+    spec:
+      containers:
+        - name: data-generator
+          image: {{ .Values.dataGenerator.image.repository }}:{{ .Values.dataGenerator.image.tag }}
+          imagePullPolicy: {{ .Values.dataGenerator.image.pullPolicy }}
+          env:
+            {{- range $key, $value := .Values.dataGenerator.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.dataGenerator.resources | nindent 12 }}
+      restartPolicy: Always
+{{- end }}

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: flink-lineage
+description: Flink lineage pipeline — Kafka to S3 with write-ahead commit log
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

@@ -1,0 +1,47 @@
+apiVersion: flink.apache.org/v1beta1
+kind: FlinkDeployment
+metadata:
+  name: {{ include "flink-lineage.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flink-lineage.labels" . | nindent 4 }}
+spec:
+  image: {{ .Values.flinkImage.repository }}:{{ .Values.flinkImage.tag }}
+  imagePullPolicy: {{ .Values.flinkImage.pullPolicy }}
+  flinkVersion: {{ .Values.flink.version }}
+  serviceAccount: {{ include "flink-lineage.serviceAccountName" . }}
+  flinkConfiguration:
+    {{- range $key, $value := .Values.flink.flinkConfiguration }}
+    {{ $key }}: {{ $value | quote }}
+    {{- end }}
+    {{- range $key, $value := .Values.flink.s3Configuration }}
+    {{ $key }}: {{ $value | quote }}
+    {{- end }}
+  jobManager:
+    resource:
+      memory: {{ .Values.flink.jobManager.resource.memory | quote }}
+      cpu: {{ .Values.flink.jobManager.resource.cpu }}
+    replicas: {{ .Values.flink.jobManager.replicas }}
+  taskManager:
+    resource:
+      memory: {{ .Values.flink.taskManager.resource.memory | quote }}
+      cpu: {{ .Values.flink.taskManager.resource.cpu }}
+    replicas: {{ .Values.flink.taskManager.replicas }}
+  podTemplate:
+    spec:
+      containers:
+        - name: flink-main-container
+          env:
+            {{- range $key, $value := .Values.flink.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+            {{- range .Values.flink.extraEnv }}
+            - name: {{ .name }}
+              value: {{ .value | quote }}
+            {{- end }}
+  job:
+    jarURI: local:///opt/flink/usrlib/flink-lineage-job.jar
+    entryClass: com.lineage.LineageJob
+    parallelism: {{ .Values.flink.job.parallelism }}
+    upgradeMode: {{ .Values.flink.job.upgradeMode }}
