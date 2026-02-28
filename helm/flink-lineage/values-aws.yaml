@@ -1,0 +1,41 @@
+flinkImage:
+  repository: "ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com/flink-lineage"
+  pullPolicy: Always
+
+dataGenerator:
+  image:
+    repository: "ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com/flink-lineage-data-generator"
+    pullPolicy: Always
+  env:
+    KAFKA_BOOTSTRAP_SERVERS: "REPLACE_WITH_MSK_BOOTSTRAP_SERVERS"
+
+serviceAccount:
+  annotations:
+    eks.amazonaws.com/role-arn: "arn:aws:iam::ACCOUNT_ID:role/REPLACE_WITH_ROLE_NAME"
+
+flink:
+  env:
+    KAFKA_BOOTSTRAP_SERVERS: "REPLACE_WITH_MSK_BOOTSTRAP_SERVERS"
+    OUTPUT_PATH: "s3://REPLACE_WITH_BUCKET/output"
+    WRITE_AHEAD_COMMIT_LOG_PATH: "s3://REPLACE_WITH_BUCKET/write-ahead-commit-log"
+    DROPPED_PATH: "s3://REPLACE_WITH_BUCKET/dropped"
+
+  s3Configuration:
+    s3.path-style-access: "false"
+
+  flinkConfiguration:
+    state.checkpoints.dir: s3://REPLACE_WITH_BUCKET/checkpoints
+    state.savepoints.dir: s3://REPLACE_WITH_BUCKET/savepoints
+
+  jobManager:
+    resource:
+      memory: "2048m"
+
+  taskManager:
+    resource:
+      memory: "4096m"
+      cpu: 2
+
+  job:
+    parallelism: 4
+    upgradeMode: savepoint

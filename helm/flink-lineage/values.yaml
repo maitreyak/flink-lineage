@@ -1,0 +1,84 @@
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+flinkImage:
+  repository: flink-lineage
+  tag: latest
+  pullPolicy: IfNotPresent
+
+dataGenerator:
+  enabled: true
+  image:
+    repository: flink-lineage-data-generator
+    tag: latest
+    pullPolicy: IfNotPresent
+  env:
+    KAFKA_BOOTSTRAP_SERVERS: "kafka.flink-lineage.svc:9092"
+    KAFKA_TOPIC: "lineage-input"
+    NUM_PARTITIONS: "10"
+    RATE_PER_SEC: "10"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+kafka:
+  enabled: false
+  image: "apache/kafka:3.9.0"
+
+minio:
+  enabled: false
+  image: "minio/minio:latest"
+  rootUser: minioadmin
+  rootPassword: minioadmin
+
+flink:
+  version: v1_19
+
+  env:
+    KAFKA_BOOTSTRAP_SERVERS: "kafka.flink-lineage.svc:9092"
+    KAFKA_TOPIC: "lineage-input"
+    OUTPUT_PATH: "s3://flink-data/output"
+    WRITE_AHEAD_COMMIT_LOG_PATH: "s3://flink-data/write-ahead-commit-log"
+    DROPPED_PATH: "s3://flink-data/dropped"
+
+  extraEnv: []
+
+  flinkConfiguration:
+    taskmanager.numberOfTaskSlots: "2"
+    state.backend: rocksdb
+    state.backend.incremental: "true"
+    state.checkpoints.dir: s3://flink-data/checkpoints
+    state.savepoints.dir: s3://flink-data/savepoints
+    execution.checkpointing.interval: "60000"
+    execution.checkpointing.mode: EXACTLY_ONCE
+    execution.checkpointing.min-pause: "10000"
+    execution.checkpointing.timeout: "300000"
+    execution.checkpointing.externalized-checkpoint-retention: RETAIN_ON_CANCELLATION
+    web.cancel.enable: "true"
+
+  s3Configuration: {}
+
+  jobManager:
+    resource:
+      memory: "1024m"
+      cpu: 1
+    replicas: 1
+
+  taskManager:
+    resource:
+      memory: "2048m"
+      cpu: 1
+    replicas: 1
+
+  job:
+    parallelism: 2
+    upgradeMode: stateless

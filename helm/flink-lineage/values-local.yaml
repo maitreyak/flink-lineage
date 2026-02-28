@@ -1,0 +1,23 @@
+flinkImage:
+  pullPolicy: Never
+
+dataGenerator:
+  image:
+    pullPolicy: Never
+
+kafka:
+  enabled: true
+
+minio:
+  enabled: true
+
+flink:
+  s3Configuration:
+    s3.endpoint: "http://minio.flink-lineage.svc:9000"
+    s3.path-style-access: "true"
+
+  extraEnv:
+    - name: AWS_ACCESS_KEY_ID
+      value: "minioadmin"
+    - name: AWS_SECRET_ACCESS_KEY
+      value: "minioadmin"
