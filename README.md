@@ -4,25 +4,68 @@ Kafka-to-S3 pipeline that reads Avro messages from Kafka, enriches them with Kaf
 
 ## Prerequisites
 
-- Docker and Docker Compose
+- Docker
 - Java 11+
 - Maven 3.6+
 - Standard Unix tools (for querying write-ahead commit log CSV files)
 
-## Quick Start
+**For Kubernetes deployment (Kind):**
+- [kind](https://kind.sigs.k8s.io/)
+- [kubectl](https://kubernetes.io/docs/tasks/tools/)
+- [Helm](https://helm.sh/)
+
+## Quick Start (Docker Compose)
 
 ```bash
 ./scripts/build-and-run.sh
 ```
 
-This script:
-1. Builds the Flink job JAR with Maven
-2. Builds Docker images
-3. Starts all services (Kafka, ZooKeeper, MinIO, Flink, data generator)
-4. Waits for Flink JobManager to be ready
-5. Submits the Flink job
+This builds the JAR and Docker images, starts all services (Kafka, ZooKeeper, MinIO, Flink, data generator), and submits the Flink job. Wait ~2 minutes for data to appear in MinIO.
 
-Wait ~2 minutes for data to appear in MinIO.
+## Kubernetes Deployment (Kind)
+
+### 1. Create the cluster
+
+```bash
+scripts/kind-setup.sh
+```
+
+Creates a Kind cluster, the `flink-lineage` namespace, and installs the Flink Kubernetes Operator.
+
+### 2. Build and deploy
+
+```bash
+scripts/deploy.sh local
+```
+
+Builds the JAR and Docker images, loads them into Kind, and deploys the Helm chart. This starts Kafka (KRaft mode), MinIO, the Flink job (via FlinkDeployment CRD), and the data generator.
+
+### 3. Verify
+
+```bash
+# All pods should be Running
+kubectl get pods -n flink-lineage
+
+# FlinkDeployment should show RUNNING / STABLE
+kubectl get flinkdeployment -n flink-lineage
+```
+
+### 4. Access UIs
+
+```bash
+# Flink Web UI — http://localhost:8081
+kubectl port-forward svc/flink-lineage-rest 8081:8081 -n flink-lineage
+
+# MinIO Console — http://localhost:9001 (minioadmin / minioadmin)
+kubectl port-forward svc/minio 9001:9001 -n flink-lineage
+```
+
+### 5. Tear down
+
+```bash
+helm uninstall flink-lineage -n flink-lineage
+kind delete cluster --name flink-lineage
+```
 
 ## Architecture
 
@@ -56,11 +99,20 @@ FileSink --> s3://flink-data/output/                    (enriched data, partitio
 
 ## Services
 
+**Docker Compose:**
+
 | Service | URL | Credentials |
 |---------|-----|-------------|
 | Flink Web UI | http://localhost:8081 | - |
 | MinIO Console | http://localhost:9001 | minioadmin / minioadmin |
 | Kafka | localhost:29092 (host) / kafka:9092 (internal) | - |
+
+**Kubernetes (via port-forward):**
+
+| Service | Command | URL |
+|---------|---------|-----|
+| Flink Web UI | `kubectl port-forward svc/flink-lineage-rest 8081:8081 -n flink-lineage` | http://localhost:8081 |
+| MinIO Console | `kubectl port-forward svc/minio 9001:9001 -n flink-lineage` | http://localhost:9001 |
 
 ## Output
 
@@ -139,8 +191,23 @@ flink-lineage/
 │       ├── EnrichedEvent.java                     # Enriched event POJO
 │       ├── InputEvent.java                        # Input event POJO
 │       └── LineageJob.java                        # Main Flink job (source, sink, wiring)
+├── helm/flink-lineage/
+│   ├── Chart.yaml
+│   ├── values.yaml                       # Base defaults
+│   ├── values-local.yaml                 # Kind + MinIO overrides
+│   ├── values-aws.yaml                   # EKS + MSK + IRSA overrides
+│   └── templates/
+│       ├── _helpers.tpl                  # Naming, labels helpers
+│       ├── serviceaccount.yaml           # With optional IRSA annotation
+│       ├── rbac.yaml                     # Role/RoleBinding for Flink pods
+│       ├── flink-deployment.yaml         # FlinkDeployment CRD
+│       ├── data-generator.yaml           # Python data generator Deployment
+│       ├── kafka.yaml                    # Kafka StatefulSet (local dev)
+│       └── minio.yaml                    # MinIO Deployment + init Job (local dev)
 ├── scripts/
-│   └── build-and-run.sh              # One-command build and deploy
+│   ├── build-and-run.sh              # Docker Compose build and deploy
+│   ├── kind-setup.sh                 # Create Kind cluster + install operator
+│   └── deploy.sh                     # Build images, load/push, helm install
 ├── docker-compose.yml
 ├── Dockerfile.flink
 └── README.md
@@ -148,12 +215,16 @@ flink-lineage/
 
 ## Stopping
 
+**Docker Compose:**
+
 ```bash
-docker compose down
+docker compose down       # keep data
+docker compose down -v    # remove MinIO data volume
 ```
 
-Add `-v` to also remove the MinIO data volume:
+**Kubernetes:**
 
 ```bash
-docker compose down -v
+helm uninstall flink-lineage -n flink-lineage
+kind delete cluster --name flink-lineage
 ```
