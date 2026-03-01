@@ -7,6 +7,7 @@ import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.formats.avro.typeutils.GenericRecordAvroTypeInfo;
 import org.apache.flink.connector.file.sink.FileSink;
 import org.apache.flink.connector.kafka.source.KafkaSource;
+import org.apache.flink.connector.kafka.source.KafkaSourceBuilder;
 import org.apache.flink.connector.kafka.source.enumerator.initializer.OffsetsInitializer;
 import org.apache.flink.connector.kafka.source.reader.deserializer.KafkaRecordDeserializationSchema;
 import org.apache.flink.core.fs.Path;
@@ -44,19 +45,26 @@ public class LineageJob {
             "WRITE_AHEAD_COMMIT_LOG_PATH", "s3://flink-data/write-ahead-commit-log");
     private static final String DROPPED_PATH = System.getenv().getOrDefault(
             "DROPPED_PATH", "s3://flink-data/dropped");
+    private static final String KAFKA_SECURITY_PROTOCOL = System.getenv().getOrDefault(
+            "KAFKA_SECURITY_PROTOCOL", "PLAINTEXT");
 
     public static void main(String[] args) throws Exception {
         final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
 
         // Kafka source using KafkaRecordDeserializationSchema for ConsumerRecord access
-        KafkaSource<ConsumerRecord<byte[], byte[]>> kafkaSource = KafkaSource
+        KafkaSourceBuilder<ConsumerRecord<byte[], byte[]>> kafkaBuilder = KafkaSource
                 .<ConsumerRecord<byte[], byte[]>>builder()
                 .setBootstrapServers(KAFKA_BOOTSTRAP)
                 .setTopics(KAFKA_TOPIC)
                 .setGroupId("flink-lineage-consumer")
                 .setStartingOffsets(OffsetsInitializer.earliest())
-                .setDeserializer(new RawKafkaDeserializer())
-                .build();
+                .setDeserializer(new RawKafkaDeserializer());
+
+        if (!"PLAINTEXT".equals(KAFKA_SECURITY_PROTOCOL)) {
+            kafkaBuilder.setProperty("security.protocol", KAFKA_SECURITY_PROTOCOL);
+        }
+
+        KafkaSource<ConsumerRecord<byte[], byte[]>> kafkaSource = kafkaBuilder.build();
 
         DataStream<ConsumerRecord<byte[], byte[]>> kafkaStream = env.fromSource(
                 kafkaSource,

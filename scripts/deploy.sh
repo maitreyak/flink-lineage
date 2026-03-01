@@ -16,9 +16,14 @@ fi
 echo "=== Building Flink job JAR ==="
 (cd "${PROJECT_DIR}/flink-job" && mvn clean package -DskipTests -q)
 
+PLATFORM_FLAG=""
+if [[ "${ENV}" == "aws" ]]; then
+  PLATFORM_FLAG="--platform linux/amd64"
+fi
+
 echo "=== Building Docker images ==="
-docker build -t flink-lineage:latest -f "${PROJECT_DIR}/Dockerfile.flink" "${PROJECT_DIR}"
-docker build -t flink-lineage-data-generator:latest "${PROJECT_DIR}/data-generator"
+docker build ${PLATFORM_FLAG} -t flink-lineage:latest -f "${PROJECT_DIR}/Dockerfile.flink" "${PROJECT_DIR}"
+docker build ${PLATFORM_FLAG} -t flink-lineage-data-generator:latest "${PROJECT_DIR}/data-generator"
 
 case "${ENV}" in
   local)

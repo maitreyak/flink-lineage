@@ -11,6 +11,7 @@ import fastavro
 from confluent_kafka import Producer
 
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
+KAFKA_SECURITY_PROTOCOL = os.getenv("KAFKA_SECURITY_PROTOCOL", "PLAINTEXT")
 TOPIC = os.getenv("KAFKA_TOPIC", "lineage-input")
 NUM_PARTITIONS = int(os.getenv("NUM_PARTITIONS", "10"))
 RATE_PER_SEC = float(os.getenv("RATE_PER_SEC", "10"))
@@ -53,11 +54,13 @@ def wait_for_kafka(producer, max_retries=30, delay=2):
 
 
 def main():
-    producer = Producer({
+    config = {
         "bootstrap.servers": KAFKA_BOOTSTRAP,
         "linger.ms": 100,
         "batch.num.messages": 1000,
-    })
+        "security.protocol": KAFKA_SECURITY_PROTOCOL,
+    }
+    producer = Producer(config)
 
     wait_for_kafka(producer)
 
