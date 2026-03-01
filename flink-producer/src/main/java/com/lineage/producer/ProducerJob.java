@@ -60,6 +60,7 @@ public class ProducerJob {
 
     public static void main(String[] args) throws Exception {
         final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
 
         LOG.info("Starting ProducerJob: bootstrap={}, topic={}, rate={}/s",
                 KAFKA_BOOTSTRAP, KAFKA_TOPIC, RATE_PER_SEC);

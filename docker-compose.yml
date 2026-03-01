@@ -95,6 +95,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.flink
+    hostname: data-generator
     depends_on:
       - kafka
     command: standalone-job --job-classname com.lineage.producer.ProducerJob
@@ -103,6 +104,20 @@ services:
       KAFKA_TOPIC: lineage-input
       RATE_PER_SEC: "10"
     restart: on-failure
+
+  data-generator-taskmanager:
+    build:
+      context: .
+      dockerfile: Dockerfile.flink
+    depends_on:
+      - data-generator
+    command: taskmanager
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: data-generator
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TOPIC: lineage-input
+      RATE_PER_SEC: "10"
 
 volumes:
   minio-data:
