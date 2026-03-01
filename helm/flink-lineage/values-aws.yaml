@@ -1,31 +1,39 @@
+# AWS values for EKS + MSK (TLS) + S3
+
 flinkImage:
-  repository: "ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com/flink-lineage"
+  repository: "605618833247.dkr.ecr.us-east-1.amazonaws.com/flink-lineage"
   pullPolicy: Always
 
 dataGenerator:
   image:
-    repository: "ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com/flink-lineage-data-generator"
+    repository: "605618833247.dkr.ecr.us-east-1.amazonaws.com/flink-lineage-data-generator"
     pullPolicy: Always
   env:
-    KAFKA_BOOTSTRAP_SERVERS: "REPLACE_WITH_MSK_BOOTSTRAP_SERVERS"
+    KAFKA_BOOTSTRAP_SERVERS: "b-2.maitmskcluster.2ndhjy.c20.kafka.us-east-1.amazonaws.com:9094,b-1.maitmskcluster.2ndhjy.c20.kafka.us-east-1.amazonaws.com:9094"
+    KAFKA_SECURITY_PROTOCOL: "SSL"
 
+# IRSA — S3 access via flink-workload IAM role
 serviceAccount:
+  name: "flink-workload"
   annotations:
-    eks.amazonaws.com/role-arn: "arn:aws:iam::ACCOUNT_ID:role/REPLACE_WITH_ROLE_NAME"
+    eks.amazonaws.com/role-arn: "arn:aws:iam::605618833247:role/mait_flink_workload_role-2860d09"
 
 flink:
   env:
-    KAFKA_BOOTSTRAP_SERVERS: "REPLACE_WITH_MSK_BOOTSTRAP_SERVERS"
-    OUTPUT_PATH: "s3://REPLACE_WITH_BUCKET/output"
-    WRITE_AHEAD_COMMIT_LOG_PATH: "s3://REPLACE_WITH_BUCKET/write-ahead-commit-log"
-    DROPPED_PATH: "s3://REPLACE_WITH_BUCKET/dropped"
+    KAFKA_BOOTSTRAP_SERVERS: "b-2.maitmskcluster.2ndhjy.c20.kafka.us-east-1.amazonaws.com:9094,b-1.maitmskcluster.2ndhjy.c20.kafka.us-east-1.amazonaws.com:9094"
+    KAFKA_TOPIC: "lineage-input"
+    KAFKA_SECURITY_PROTOCOL: "SSL"
+    OUTPUT_PATH: "s3://flink-data-outputs/output"
+    WRITE_AHEAD_COMMIT_LOG_PATH: "s3://flink-commit-log/write-ahead-commit-log"
+    DROPPED_PATH: "s3://flink-data-outputs/dropped"
 
   s3Configuration:
     s3.path-style-access: "false"
+    fs.s3a.aws.credentials.provider: "com.amazonaws.auth.WebIdentityTokenCredentialsProvider"
 
   flinkConfiguration:
-    state.checkpoints.dir: s3://REPLACE_WITH_BUCKET/checkpoints
-    state.savepoints.dir: s3://REPLACE_WITH_BUCKET/savepoints
+    state.checkpoints.dir: s3://flink-data-outputs/checkpoints
+    state.savepoints.dir: s3://flink-data-outputs/savepoints
 
   jobManager:
     resource:
@@ -34,7 +42,7 @@ flink:
   taskManager:
     resource:
       memory: "4096m"
-      cpu: 2
+      cpu: 1
 
   job:
     parallelism: 4
