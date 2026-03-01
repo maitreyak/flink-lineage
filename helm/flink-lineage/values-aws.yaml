@@ -4,13 +4,12 @@ flinkImage:
   repository: "605618833247.dkr.ecr.us-east-1.amazonaws.com/flink-lineage"
   pullPolicy: Always
 
-dataGenerator:
-  image:
-    repository: "605618833247.dkr.ecr.us-east-1.amazonaws.com/flink-lineage-data-generator"
-    pullPolicy: Always
+flinkProducer:
   env:
     KAFKA_BOOTSTRAP_SERVERS: "b-2.maitmskcluster.2ndhjy.c20.kafka.us-east-1.amazonaws.com:9094,b-1.maitmskcluster.2ndhjy.c20.kafka.us-east-1.amazonaws.com:9094"
+    KAFKA_TOPIC: "lineage-input"
     KAFKA_SECURITY_PROTOCOL: "SSL"
+    RATE_PER_SEC: "10"
 
 # IRSA — S3 access via flink-workload IAM role
 serviceAccount:

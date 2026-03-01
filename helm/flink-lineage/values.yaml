@@ -11,24 +11,25 @@ flinkImage:
   tag: latest
   pullPolicy: IfNotPresent
 
-dataGenerator:
+flinkProducer:
   enabled: true
-  image:
-    repository: flink-lineage-data-generator
-    tag: latest
-    pullPolicy: IfNotPresent
   env:
     KAFKA_BOOTSTRAP_SERVERS: "kafka.flink-lineage.svc:9092"
     KAFKA_TOPIC: "lineage-input"
-    NUM_PARTITIONS: "10"
     RATE_PER_SEC: "10"
-  resources:
-    requests:
-      cpu: 100m
-      memory: 128Mi
-    limits:
-      cpu: 200m
-      memory: 256Mi
+  flinkConfiguration:
+    taskmanager.numberOfTaskSlots: "1"
+  jobManager:
+    resource:
+      memory: "1024m"
+      cpu: 0.5
+  taskManager:
+    resource:
+      memory: "1024m"
+      cpu: 0.5
+  job:
+    parallelism: 1
+    upgradeMode: stateless
 
 kafka:
   enabled: false

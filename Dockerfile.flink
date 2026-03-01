@@ -4,8 +4,9 @@ FROM flink:1.19-java11
 RUN mkdir -p /opt/flink/plugins/s3-fs-hadoop && \
     cp /opt/flink/opt/flink-s3-fs-hadoop-*.jar /opt/flink/plugins/s3-fs-hadoop/
 
-# Copy the job JAR
+# Copy the job JARs
 COPY flink-job/target/flink-lineage-job-1.0-SNAPSHOT.jar /opt/flink/usrlib/flink-lineage-job.jar
+COPY flink-producer/target/flink-producer-1.0-SNAPSHOT.jar /opt/flink/usrlib/flink-producer.jar
 
 # Copy Flink config
 COPY flink-conf/flink-conf.yaml /opt/flink/conf/flink-conf.yaml

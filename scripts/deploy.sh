@@ -13,24 +13,23 @@ if [[ -z "${ENV}" ]]; then
   exit 1
 fi
 
-echo "=== Building Flink job JAR ==="
+echo "=== Building Flink job JARs ==="
 (cd "${PROJECT_DIR}/flink-job" && mvn clean package -DskipTests -q)
+(cd "${PROJECT_DIR}/flink-producer" && mvn clean package -DskipTests -q)
 
 PLATFORM_FLAG=""
 if [[ "${ENV}" == "aws" ]]; then
   PLATFORM_FLAG="--platform linux/amd64"
 fi
 
-echo "=== Building Docker images ==="
+echo "=== Building Docker image ==="
 docker build ${PLATFORM_FLAG} -t flink-lineage:latest -f "${PROJECT_DIR}/Dockerfile.flink" "${PROJECT_DIR}"
-docker build ${PLATFORM_FLAG} -t flink-lineage-data-generator:latest "${PROJECT_DIR}/data-generator"
 
 case "${ENV}" in
   local)
     CLUSTER_NAME="${KIND_CLUSTER_NAME:-flink-lineage}"
-    echo "=== Loading images into Kind cluster '${CLUSTER_NAME}' ==="
+    echo "=== Loading image into Kind cluster '${CLUSTER_NAME}' ==="
     kind load docker-image flink-lineage:latest --name "${CLUSTER_NAME}"
-    kind load docker-image flink-lineage-data-generator:latest --name "${CLUSTER_NAME}"
 
     echo "=== Deploying with Helm (local) ==="
     helm upgrade --install "${RELEASE_NAME}" "${CHART_DIR}" \
@@ -49,16 +48,12 @@ case "${ENV}" in
     docker tag flink-lineage:latest "${ECR_REGISTRY}/flink-lineage:latest"
     docker push "${ECR_REGISTRY}/flink-lineage:latest"
 
-    docker tag flink-lineage-data-generator:latest "${ECR_REGISTRY}/flink-lineage-data-generator:latest"
-    docker push "${ECR_REGISTRY}/flink-lineage-data-generator:latest"
-
     echo "=== Deploying with Helm (aws) ==="
     helm upgrade --install "${RELEASE_NAME}" "${CHART_DIR}" \
       --namespace "${NAMESPACE}" \
       --values "${CHART_DIR}/values.yaml" \
       --values "${CHART_DIR}/values-aws.yaml" \
-      --set flinkImage.repository="${ECR_REGISTRY}/flink-lineage" \
-      --set dataGenerator.image.repository="${ECR_REGISTRY}/flink-lineage-data-generator"
+      --set flinkImage.repository="${ECR_REGISTRY}/flink-lineage"
     ;;
 
   *)

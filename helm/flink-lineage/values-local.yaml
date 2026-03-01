@@ -1,10 +1,6 @@
 flinkImage:
   pullPolicy: Never
 
-dataGenerator:
-  image:
-    pullPolicy: Never
-
 kafka:
   enabled: true
 

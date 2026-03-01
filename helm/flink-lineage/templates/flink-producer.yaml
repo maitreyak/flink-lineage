@@ -1,0 +1,41 @@
+{{- if .Values.flinkProducer.enabled }}
+apiVersion: flink.apache.org/v1beta1
+kind: FlinkDeployment
+metadata:
+  name: {{ include "flink-lineage.fullname" . }}-producer
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flink-lineage.labels" . | nindent 4 }}
+    app.kubernetes.io/component: producer
+spec:
+  image: {{ .Values.flinkImage.repository }}:{{ .Values.flinkImage.tag }}
+  imagePullPolicy: {{ .Values.flinkImage.pullPolicy }}
+  flinkVersion: {{ .Values.flink.version }}
+  serviceAccount: {{ include "flink-lineage.serviceAccountName" . }}
+  flinkConfiguration:
+    {{- range $key, $value := .Values.flinkProducer.flinkConfiguration }}
+    {{ $key }}: {{ $value | quote }}
+    {{- end }}
+  jobManager:
+    resource:
+      memory: {{ .Values.flinkProducer.jobManager.resource.memory | quote }}
+      cpu: {{ .Values.flinkProducer.jobManager.resource.cpu }}
+  taskManager:
+    resource:
+      memory: {{ .Values.flinkProducer.taskManager.resource.memory | quote }}
+      cpu: {{ .Values.flinkProducer.taskManager.resource.cpu }}
+  podTemplate:
+    spec:
+      containers:
+        - name: flink-main-container
+          env:
+            {{- range $key, $value := .Values.flinkProducer.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+  job:
+    jarURI: local:///opt/flink/usrlib/flink-producer.jar
+    entryClass: com.lineage.producer.ProducerJob
+    parallelism: {{ .Values.flinkProducer.job.parallelism }}
+    upgradeMode: {{ .Values.flinkProducer.job.upgradeMode }}
+{{- end }}

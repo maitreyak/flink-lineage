@@ -93,13 +93,14 @@ services:
 
   data-generator:
     build:
-      context: ./data-generator
+      context: .
+      dockerfile: Dockerfile.flink
     depends_on:
       - kafka
+    command: standalone-job --job-classname com.lineage.producer.ProducerJob
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       KAFKA_TOPIC: lineage-input
-      NUM_PARTITIONS: "10"
       RATE_PER_SEC: "10"
     restart: on-failure
 
