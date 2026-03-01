@@ -14,6 +14,11 @@ Kafka-to-S3 pipeline that reads Avro messages from Kafka, enriches them with Kaf
 - [kubectl](https://kubernetes.io/docs/tasks/tools/)
 - [Helm](https://helm.sh/)
 
+**For AWS deployment (EKS):**
+- [AWS CLI](https://aws.amazon.com/cli/)
+- [kubectl](https://kubernetes.io/docs/tasks/tools/) configured for EKS
+- [Helm](https://helm.sh/)
+
 ## Quick Start (Docker Compose)
 
 ```bash
@@ -67,6 +72,72 @@ helm uninstall flink-lineage -n flink-lineage
 kind delete cluster --name flink-lineage
 ```
 
+## AWS Deployment (EKS + MSK + S3)
+
+### Prerequisites
+
+- [AWS CLI](https://aws.amazon.com/cli/) configured with appropriate credentials
+- An EKS cluster with `kubectl` context configured
+- An MSK cluster with TLS listeners (port 9094)
+- S3 buckets for data output and commit log
+- An IAM role with S3 access and an OIDC trust policy for IRSA
+- ECR repositories for `flink-lineage` and `flink-lineage-data-generator`
+
+### 1. Create ECR repositories
+
+```bash
+aws ecr create-repository --repository-name flink-lineage --region us-east-1
+aws ecr create-repository --repository-name flink-lineage-data-generator --region us-east-1
+```
+
+### 2. Install the Flink Operator
+
+```bash
+kubectl create namespace flink-lineage
+helm repo add flink-operator-repo https://archive.apache.org/dist/flink/flink-kubernetes-operator-1.10.0/
+helm install flink-kubernetes-operator flink-operator-repo/flink-kubernetes-operator \
+  --namespace flink-lineage \
+  --set webhook.create=false
+```
+
+### 3. Configure values-aws.yaml
+
+Update `helm/flink-lineage/values-aws.yaml` with your:
+- ECR image repository URIs
+- MSK bootstrap server addresses
+- S3 bucket names
+- IRSA role ARN for the service account
+
+### 4. Build and deploy
+
+```bash
+ECR_REGISTRY=<account-id>.dkr.ecr.<region>.amazonaws.com AWS_REGION=<region> scripts/deploy.sh aws
+```
+
+This builds the JAR and Docker images (targeting `linux/amd64`), pushes to ECR, and deploys the Helm chart with `values-aws.yaml`.
+
+### 5. Verify
+
+```bash
+# All pods should be Running
+kubectl get pods -n flink-lineage
+
+# FlinkDeployment should show RUNNING / STABLE
+kubectl get flinkdeployment -n flink-lineage
+
+# Check S3 for output
+aws s3 ls s3://<output-bucket>/output/ --recursive
+aws s3 ls s3://<commit-log-bucket>/write-ahead-commit-log/ --recursive
+```
+
+### 6. Tear down
+
+```bash
+helm uninstall flink-lineage -n flink-lineage
+helm uninstall flink-kubernetes-operator -n flink-lineage
+kubectl delete namespace flink-lineage
+```
+
 ## Architecture
 
 ```
@@ -107,12 +178,18 @@ FileSink --> s3://flink-data/output/                    (enriched data, partitio
 | MinIO Console | http://localhost:9001 | minioadmin / minioadmin |
 | Kafka | localhost:29092 (host) / kafka:9092 (internal) | - |
 
-**Kubernetes (via port-forward):**
+**Kubernetes — Kind (via port-forward):**
 
 | Service | Command | URL |
 |---------|---------|-----|
 | Flink Web UI | `kubectl port-forward svc/flink-lineage-rest 8081:8081 -n flink-lineage` | http://localhost:8081 |
 | MinIO Console | `kubectl port-forward svc/minio 9001:9001 -n flink-lineage` | http://localhost:9001 |
+
+**Kubernetes — AWS EKS (via port-forward):**
+
+| Service | Command | URL |
+|---------|---------|-----|
+| Flink Web UI | `kubectl port-forward svc/flink-lineage-rest 8081:8081 -n flink-lineage` | http://localhost:8081 |
 
 ## Output
 
@@ -160,8 +237,10 @@ Environment variables (set in `docker-compose.yml`):
 |----------|---------|-------------|
 | `KAFKA_BOOTSTRAP_SERVERS` | `kafka:9092` | Kafka broker address |
 | `KAFKA_TOPIC` | `lineage-input` | Source Kafka topic |
+| `KAFKA_SECURITY_PROTOCOL` | `PLAINTEXT` | Kafka security protocol (`PLAINTEXT` or `SSL` for MSK TLS) |
 | `OUTPUT_PATH` | `s3://flink-data/output` | Data sink path |
 | `WRITE_AHEAD_COMMIT_LOG_PATH` | `s3://flink-data/write-ahead-commit-log` | Write-ahead commit log base path |
+| `DROPPED_PATH` | `s3://flink-data/dropped` | Path for dropped/invalid records |
 
 Flink settings are in `flink-conf/flink-conf.yaml`:
 - Checkpointing: 60s interval, EXACTLY_ONCE
@@ -222,9 +301,17 @@ docker compose down       # keep data
 docker compose down -v    # remove MinIO data volume
 ```
 
-**Kubernetes:**
+**Kubernetes (Kind):**
 
 ```bash
 helm uninstall flink-lineage -n flink-lineage
 kind delete cluster --name flink-lineage
+```
+
+**Kubernetes (AWS EKS):**
+
+```bash
+helm uninstall flink-lineage -n flink-lineage
+helm uninstall flink-kubernetes-operator -n flink-lineage
+kubectl delete namespace flink-lineage
 ```
