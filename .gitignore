@@ -1,6 +1,8 @@
 # Maven build output
 flink-job/target/
 flink-job/dependency-reduced-pom.xml
+flink-producer/target/
+flink-producer/dependency-reduced-pom.xml
 
 # IDE
 .idea/
