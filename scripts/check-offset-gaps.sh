@@ -5,9 +5,10 @@ set -euo pipefail
 #
 # Usage: ./check-offset-gaps.sh <start_checkpoint> <end_checkpoint>
 #
-# Reads commit log CSVs from MinIO (via docker compose exec), downloads the
-# referenced parquet files, and uses DuckDB to verify there are no missing
-# offsets per Kafka partition when output + dropped records are combined.
+# Auto-detects the runtime environment (docker compose or Kind/kubectl) and
+# reads commit log CSVs from MinIO, downloads the referenced parquet files,
+# and uses DuckDB to verify there are no missing offsets per Kafka partition
+# when output + dropped records are combined.
 
 START_CHK="${1:-}"
 END_CHK="${2:-}"
@@ -26,10 +27,42 @@ fi
 WORK_DIR=$(mktemp -d)
 trap 'rm -rf "${WORK_DIR}"' EXIT
 
-MINIO_CONTAINER=$(docker compose ps -q minio 2>/dev/null)
-if [[ -z "${MINIO_CONTAINER}" ]]; then
-  echo "ERROR: MinIO container is not running. Start services with: docker compose up -d"
+NAMESPACE="flink-lineage"
+
+# Auto-detect environment: docker compose or Kind (kubectl)
+detect_environment() {
+  if docker compose ps -q minio &>/dev/null && [[ -n "$(docker compose ps -q minio 2>/dev/null)" ]]; then
+    echo "compose"
+  elif kubectl get pod -n "${NAMESPACE}" -l app.kubernetes.io/component=minio -o name 2>/dev/null | grep -q pod/; then
+    echo "kind"
+  else
+    echo "none"
+  fi
+}
+
+ENV_TYPE=$(detect_environment)
+
+if [[ "${ENV_TYPE}" == "none" ]]; then
+  echo "ERROR: No MinIO found. Start services with 'docker compose up -d' or deploy to Kind."
   exit 1
+fi
+
+echo "Detected environment: ${ENV_TYPE}"
+
+# Helper: run mc command against MinIO
+mc_cmd() {
+  if [[ "${ENV_TYPE}" == "compose" ]]; then
+    docker compose exec -T minio mc "$@" 2>/dev/null
+  else
+    local minio_pod
+    minio_pod=$(kubectl get pod -n "${NAMESPACE}" -l app.kubernetes.io/component=minio -o jsonpath='{.items[0].metadata.name}')
+    kubectl exec -n "${NAMESPACE}" "${minio_pod}" -- mc "$@" 2>/dev/null
+  fi
+}
+
+# Ensure mc alias is configured for Kind (docker compose image has it pre-configured)
+if [[ "${ENV_TYPE}" == "kind" ]]; then
+  mc_cmd alias set local http://localhost:9000 minioadmin minioadmin >/dev/null 2>&1 || true
 fi
 
 WAL_PREFIX="local/flink-data/write-ahead-commit-log"
@@ -44,7 +77,7 @@ DROPPED_FILES=""
 for chk in $(seq "${START_CHK}" "${END_CHK}"); do
   for st in 0 1; do
     # Output files
-    csv=$(docker compose exec -T minio mc cat "${WAL_PREFIX}/chk-${chk}/output-subtask-${st}.csv" 2>/dev/null || true)
+    csv=$(mc_cmd cat "${WAL_PREFIX}/chk-${chk}/output-subtask-${st}.csv" || true)
     if [[ -n "${csv}" ]]; then
       paths=$(echo "${csv}" | tail -n +2 | cut -d',' -f2)
       for p in ${paths}; do
@@ -53,7 +86,7 @@ for chk in $(seq "${START_CHK}" "${END_CHK}"); do
     fi
 
     # Dropped files
-    csv=$(docker compose exec -T minio mc cat "${WAL_PREFIX}/chk-${chk}/dropped-subtask-${st}.csv" 2>/dev/null || true)
+    csv=$(mc_cmd cat "${WAL_PREFIX}/chk-${chk}/dropped-subtask-${st}.csv" || true)
     if [[ -n "${csv}" ]]; then
       paths=$(echo "${csv}" | tail -n +2 | cut -d',' -f2)
       for p in ${paths}; do
@@ -74,16 +107,15 @@ DROPPED_DIR="${WORK_DIR}/dropped"
 mkdir -p "${OUTPUT_DIR}" "${DROPPED_DIR}"
 
 for s3_path in ${OUTPUT_FILES}; do
-  # Convert s3://flink-data/output/... -> local/flink-data/output/...
   minio_path="local/${s3_path#s3://}"
   filename=$(basename "${s3_path}")
-  docker compose exec -T minio mc cat "${minio_path}" > "${OUTPUT_DIR}/${filename}"
+  mc_cmd cat "${minio_path}" > "${OUTPUT_DIR}/${filename}"
 done
 
 for s3_path in ${DROPPED_FILES}; do
   minio_path="local/${s3_path#s3://}"
   filename=$(basename "${s3_path}")
-  docker compose exec -T minio mc cat "${minio_path}" > "${DROPPED_DIR}/${filename}"
+  mc_cmd cat "${minio_path}" > "${DROPPED_DIR}/${filename}"
 done
 
 output_count=$(find "${OUTPUT_DIR}" -type f | wc -l | tr -d ' ')
