@@ -18,6 +18,7 @@ flinkProducer:
     KAFKA_TOPIC: "lineage-input"
     RATE_PER_SEC: "10"
   flinkConfiguration:
+    pipeline.name: lineage-producer
     taskmanager.numberOfTaskSlots: "1"
   jobManager:
     resource:
@@ -55,7 +56,10 @@ flink:
   extraEnv: []
 
   flinkConfiguration:
+    pipeline.name: lineage-consumer
     taskmanager.numberOfTaskSlots: "2"
+    high-availability: kubernetes
+    high-availability.storageDir: s3://flink-data/ha
     state.backend: rocksdb
     state.backend.incremental: "true"
     state.checkpoints.dir: s3://flink-data/checkpoints

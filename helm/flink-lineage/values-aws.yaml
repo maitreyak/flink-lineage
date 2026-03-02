@@ -43,6 +43,7 @@ flink:
     fs.s3a.aws.credentials.provider: "com.amazonaws.auth.WebIdentityTokenCredentialsProvider"
 
   flinkConfiguration:
+    high-availability.storageDir: s3://flink-data-outputs/ha
     state.checkpoints.dir: s3://flink-data-outputs/checkpoints
     state.savepoints.dir: s3://flink-data-outputs/savepoints
 
@@ -58,4 +59,4 @@ flink:
 
   job:
     parallelism: 8
-    upgradeMode: savepoint
+    upgradeMode: last-state
