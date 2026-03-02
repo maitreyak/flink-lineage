@@ -58,8 +58,11 @@ kubectl get flinkdeployment -n flink-lineage
 ### 4. Access UIs
 
 ```bash
-# Flink Web UI — http://localhost:8081
+# Flink Consumer Web UI — http://localhost:8081
 kubectl port-forward svc/flink-lineage-rest 8081:8081 -n flink-lineage
+
+# Flink Producer Web UI — http://localhost:8082
+kubectl port-forward svc/flink-lineage-producer-rest 8082:8081 -n flink-lineage
 
 # MinIO Console — http://localhost:9001 (minioadmin / minioadmin)
 kubectl port-forward svc/minio 9001:9001 -n flink-lineage
@@ -184,14 +187,16 @@ FileSink --> s3://flink-data/output/                    (enriched data, partitio
 
 | Service | Command | URL |
 |---------|---------|-----|
-| Flink Web UI | `kubectl port-forward svc/flink-lineage-rest 8081:8081 -n flink-lineage` | http://localhost:8081 |
+| Flink Consumer UI | `kubectl port-forward svc/flink-lineage-rest 8081:8081 -n flink-lineage` | http://localhost:8081 |
+| Flink Producer UI | `kubectl port-forward svc/flink-lineage-producer-rest 8082:8081 -n flink-lineage` | http://localhost:8082 |
 | MinIO Console | `kubectl port-forward svc/minio 9001:9001 -n flink-lineage` | http://localhost:9001 |
 
 **Kubernetes — AWS EKS (via port-forward):**
 
 | Service | Command | URL |
 |---------|---------|-----|
-| Flink Web UI | `kubectl port-forward svc/flink-lineage-rest 8081:8081 -n flink-lineage` | http://localhost:8081 |
+| Flink Consumer UI | `kubectl port-forward svc/flink-lineage-rest 8081:8081 -n flink-lineage` | http://localhost:8081 |
+| Flink Producer UI | `kubectl port-forward svc/flink-lineage-producer-rest 8082:8081 -n flink-lineage` | http://localhost:8082 |
 
 ## Output
 
