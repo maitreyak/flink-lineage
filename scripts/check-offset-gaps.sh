@@ -108,7 +108,7 @@ OUTPUT_FILES=""
 DROPPED_FILES=""
 
 for chk in $(seq "${START_CHK}" "${END_CHK}"); do
-  for st in 0 1; do
+  for st in $(seq 0 15); do
     # Output files
     csv=$(read_file "${WAL_S3_PATH}/chk-${chk}/output-subtask-${st}.csv" || true)
     if [[ -n "${csv}" ]]; then

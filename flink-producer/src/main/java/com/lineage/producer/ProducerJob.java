@@ -97,10 +97,7 @@ public class ProducerJob {
         KafkaSink<byte[]> kafkaSink = KafkaSink.<byte[]>builder()
                 .setBootstrapServers(KAFKA_BOOTSTRAP)
                 .setKafkaProducerConfig(kafkaProps)
-                .setRecordSerializer(KafkaRecordSerializationSchema.<byte[]>builder()
-                        .setTopic(KAFKA_TOPIC)
-                        .setValueSerializationSchema(new ByteArraySerializationSchema())
-                        .build())
+                .setRecordSerializer(new KeyedByteArraySerializationSchema(KAFKA_TOPIC))
                 .setDeliveryGuarantee(DeliveryGuarantee.AT_LEAST_ONCE)
                 .build();
 
