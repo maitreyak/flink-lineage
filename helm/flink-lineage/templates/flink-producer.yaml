@@ -39,4 +39,5 @@ spec:
     entryClass: com.lineage.producer.ProducerJob
     parallelism: {{ .Values.flinkProducer.job.parallelism }}
     upgradeMode: {{ .Values.flinkProducer.job.upgradeMode }}
+    state: {{ .Values.flinkProducer.job.state }}
 {{- end }}

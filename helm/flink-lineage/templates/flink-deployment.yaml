@@ -45,3 +45,4 @@ spec:
     entryClass: com.lineage.LineageJob
     parallelism: {{ .Values.flink.job.parallelism }}
     upgradeMode: {{ .Values.flink.job.upgradeMode }}
+    state: {{ .Values.flink.job.state }}

@@ -32,6 +32,7 @@ flinkProducer:
   job:
     parallelism: 1
     upgradeMode: stateless
+    state: running
 
 kafka:
   enabled: false
@@ -88,3 +89,4 @@ flink:
   job:
     parallelism: 2
     upgradeMode: stateless
+    state: running
