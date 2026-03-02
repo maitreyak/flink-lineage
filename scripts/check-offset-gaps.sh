@@ -3,19 +3,26 @@ set -euo pipefail
 
 # Check for offset gaps in parquet files referenced by the write-ahead commit log.
 #
-# Usage: ./check-offset-gaps.sh <start_checkpoint> <end_checkpoint>
+# Usage: ./check-offset-gaps.sh <docker|kind|aws> <start_checkpoint> <end_checkpoint>
 #
-# Auto-detects the runtime environment (docker compose or Kind/kubectl) and
-# reads commit log CSVs from MinIO, downloads the referenced parquet files,
-# and uses DuckDB to verify there are no missing offsets per Kafka partition
-# when output + dropped records are combined.
+# Reads commit log CSVs, downloads the referenced parquet files, and uses
+# DuckDB to verify there are no missing offsets per Kafka partition when
+# output + dropped records are combined.
+#
+# Override WAL path with: WAL_S3_PATH=s3://my-bucket/wal ./check-offset-gaps.sh aws 1 4
 
-START_CHK="${1:-}"
-END_CHK="${2:-}"
+ENV_TYPE="${1:-}"
+START_CHK="${2:-}"
+END_CHK="${3:-}"
 
-if [[ -z "${START_CHK}" || -z "${END_CHK}" ]]; then
-  echo "Usage: $0 <start_checkpoint> <end_checkpoint>"
-  echo "Example: $0 1 4"
+if [[ -z "${ENV_TYPE}" || -z "${START_CHK}" || -z "${END_CHK}" ]]; then
+  echo "Usage: $0 <docker|kind|aws> <start_checkpoint> <end_checkpoint>"
+  echo "Example: $0 docker 1 4"
+  exit 1
+fi
+
+if [[ "${ENV_TYPE}" != "docker" && "${ENV_TYPE}" != "kind" && "${ENV_TYPE}" != "aws" ]]; then
+  echo "ERROR: Invalid environment '${ENV_TYPE}'. Must be one of: docker, kind, aws"
   exit 1
 fi
 
@@ -29,43 +36,69 @@ trap 'rm -rf "${WORK_DIR}"' EXIT
 
 NAMESPACE="flink-lineage"
 
-# Auto-detect environment: docker compose or Kind (kubectl)
-detect_environment() {
-  if docker compose ps -q minio &>/dev/null && [[ -n "$(docker compose ps -q minio 2>/dev/null)" ]]; then
-    echo "compose"
-  elif kubectl get pod -n "${NAMESPACE}" -l app.kubernetes.io/component=minio -o name 2>/dev/null | grep -q pod/; then
-    echo "kind"
-  else
-    echo "none"
-  fi
-}
-
-ENV_TYPE=$(detect_environment)
-
-if [[ "${ENV_TYPE}" == "none" ]]; then
-  echo "ERROR: No MinIO found. Start services with 'docker compose up -d' or deploy to Kind."
-  exit 1
+# Map "docker" argument to internal "compose" label
+if [[ "${ENV_TYPE}" == "docker" ]]; then
+  ENV_TYPE="compose"
 fi
 
-echo "Detected environment: ${ENV_TYPE}"
+echo "Environment: ${ENV_TYPE}"
 
-# Helper: run mc command against MinIO
-mc_cmd() {
-  if [[ "${ENV_TYPE}" == "compose" ]]; then
-    docker compose exec -T minio mc "$@" 2>/dev/null
-  else
-    local minio_pod
-    minio_pod=$(kubectl get pod -n "${NAMESPACE}" -l app.kubernetes.io/component=minio -o jsonpath='{.items[0].metadata.name}')
-    kubectl exec -n "${NAMESPACE}" "${minio_pod}" -- mc "$@" 2>/dev/null
-  fi
+# Set WAL S3 path per environment (can be overridden via WAL_S3_PATH env var)
+if [[ -z "${WAL_S3_PATH:-}" ]]; then
+  case "${ENV_TYPE}" in
+    compose|kind) WAL_S3_PATH="s3://flink-data/write-ahead-commit-log" ;;
+    aws)          WAL_S3_PATH="s3://flink-commit-log/write-ahead-commit-log" ;;
+  esac
+fi
+
+echo "WAL path: ${WAL_S3_PATH}"
+
+# Helper: read a file from object storage to stdout
+read_file() {
+  local s3_path="$1"
+  case "${ENV_TYPE}" in
+    compose)
+      local minio_path="local/${s3_path#s3://}"
+      docker compose exec -T minio mc cat "${minio_path}" 2>/dev/null
+      ;;
+    kind)
+      local minio_pod
+      minio_pod=$(kubectl get pod -n "${NAMESPACE}" -l app.kubernetes.io/component=minio -o jsonpath='{.items[0].metadata.name}')
+      local minio_path="local/${s3_path#s3://}"
+      kubectl exec -n "${NAMESPACE}" "${minio_pod}" -- mc cat "${minio_path}" 2>/dev/null
+      ;;
+    aws)
+      aws s3 cp "${s3_path}" - 2>/dev/null
+      ;;
+  esac
 }
 
-# Ensure mc alias is configured for Kind (docker compose image has it pre-configured)
+# Helper: download a file from object storage to a local path
+download_file() {
+  local s3_path="$1"
+  local local_path="$2"
+  case "${ENV_TYPE}" in
+    compose)
+      local minio_path="local/${s3_path#s3://}"
+      docker compose exec -T minio mc cat "${minio_path}" > "${local_path}" 2>/dev/null
+      ;;
+    kind)
+      local minio_pod
+      minio_pod=$(kubectl get pod -n "${NAMESPACE}" -l app.kubernetes.io/component=minio -o jsonpath='{.items[0].metadata.name}')
+      local minio_path="local/${s3_path#s3://}"
+      kubectl exec -n "${NAMESPACE}" "${minio_pod}" -- mc cat "${minio_path}" > "${local_path}" 2>/dev/null
+      ;;
+    aws)
+      aws s3 cp "${s3_path}" "${local_path}" --quiet 2>/dev/null
+      ;;
+  esac
+}
+
+# Ensure mc alias is configured for Kind
 if [[ "${ENV_TYPE}" == "kind" ]]; then
-  mc_cmd alias set local http://localhost:9000 minioadmin minioadmin >/dev/null 2>&1 || true
+  local_minio_pod=$(kubectl get pod -n "${NAMESPACE}" -l app.kubernetes.io/component=minio -o jsonpath='{.items[0].metadata.name}')
+  kubectl exec -n "${NAMESPACE}" "${local_minio_pod}" -- mc alias set local http://localhost:9000 minioadmin minioadmin >/dev/null 2>&1 || true
 fi
-
-WAL_PREFIX="local/flink-data/write-ahead-commit-log"
 
 echo "Checking offset gaps for checkpoints ${START_CHK} to ${END_CHK}..."
 echo ""
@@ -77,7 +110,7 @@ DROPPED_FILES=""
 for chk in $(seq "${START_CHK}" "${END_CHK}"); do
   for st in 0 1; do
     # Output files
-    csv=$(mc_cmd cat "${WAL_PREFIX}/chk-${chk}/output-subtask-${st}.csv" || true)
+    csv=$(read_file "${WAL_S3_PATH}/chk-${chk}/output-subtask-${st}.csv" || true)
     if [[ -n "${csv}" ]]; then
       paths=$(echo "${csv}" | tail -n +2 | cut -d',' -f2)
       for p in ${paths}; do
@@ -86,7 +119,7 @@ for chk in $(seq "${START_CHK}" "${END_CHK}"); do
     fi
 
     # Dropped files
-    csv=$(mc_cmd cat "${WAL_PREFIX}/chk-${chk}/dropped-subtask-${st}.csv" || true)
+    csv=$(read_file "${WAL_S3_PATH}/chk-${chk}/dropped-subtask-${st}.csv" || true)
     if [[ -n "${csv}" ]]; then
       paths=$(echo "${csv}" | tail -n +2 | cut -d',' -f2)
       for p in ${paths}; do
@@ -101,21 +134,19 @@ if [[ -z "${OUTPUT_FILES}" && -z "${DROPPED_FILES}" ]]; then
   exit 1
 fi
 
-# Step 2: Download parquet files from MinIO
+# Step 2: Download parquet files
 OUTPUT_DIR="${WORK_DIR}/output"
 DROPPED_DIR="${WORK_DIR}/dropped"
 mkdir -p "${OUTPUT_DIR}" "${DROPPED_DIR}"
 
 for s3_path in ${OUTPUT_FILES}; do
-  minio_path="local/${s3_path#s3://}"
   filename=$(basename "${s3_path}")
-  mc_cmd cat "${minio_path}" > "${OUTPUT_DIR}/${filename}"
+  download_file "${s3_path}" "${OUTPUT_DIR}/${filename}"
 done
 
 for s3_path in ${DROPPED_FILES}; do
-  minio_path="local/${s3_path#s3://}"
   filename=$(basename "${s3_path}")
-  mc_cmd cat "${minio_path}" > "${DROPPED_DIR}/${filename}"
+  download_file "${s3_path}" "${DROPPED_DIR}/${filename}"
 done
 
 output_count=$(find "${OUTPUT_DIR}" -type f | wc -l | tr -d ' ')
