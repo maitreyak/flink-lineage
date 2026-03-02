@@ -9,7 +9,19 @@ flinkProducer:
     KAFKA_BOOTSTRAP_SERVERS: "b-2.maitmskcluster.2ndhjy.c20.kafka.us-east-1.amazonaws.com:9094,b-1.maitmskcluster.2ndhjy.c20.kafka.us-east-1.amazonaws.com:9094"
     KAFKA_TOPIC: "lineage-input"
     KAFKA_SECURITY_PROTOCOL: "SSL"
-    RATE_PER_SEC: "10"
+    RATE_PER_SEC: "500"
+  flinkConfiguration:
+    taskmanager.numberOfTaskSlots: "2"
+  jobManager:
+    resource:
+      memory: "2048m"
+  taskManager:
+    resource:
+      memory: "2048m"
+      cpu: 1
+    replicas: 2
+  job:
+    parallelism: 4
 
 # IRSA — S3 access via flink-workload IAM role
 serviceAccount:
@@ -41,8 +53,9 @@ flink:
   taskManager:
     resource:
       memory: "4096m"
-      cpu: 1
+      cpu: 2
+    replicas: 4
 
   job:
-    parallelism: 4
+    parallelism: 8
     upgradeMode: savepoint

@@ -27,6 +27,7 @@ flinkProducer:
     resource:
       memory: "1024m"
       cpu: 0.5
+    replicas: 1
   job:
     parallelism: 1
     upgradeMode: stateless

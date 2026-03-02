@@ -24,6 +24,7 @@ spec:
     resource:
       memory: {{ .Values.flinkProducer.taskManager.resource.memory | quote }}
       cpu: {{ .Values.flinkProducer.taskManager.resource.cpu }}
+    replicas: {{ .Values.flinkProducer.taskManager.replicas }}
   podTemplate:
     spec:
       containers:
