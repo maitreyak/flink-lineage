@@ -7,7 +7,7 @@ Kafka-to-S3 pipeline that reads Avro messages from Kafka, enriches them with Kaf
 - Docker
 - Java 11+
 - Maven 3.6+
-- Standard Unix tools (for querying write-ahead commit log CSV files)
+- [DuckDB](https://duckdb.org/) (for offset gap verification: `brew install duckdb`)
 
 **For Kubernetes deployment (Kind):**
 - [kind](https://kind.sigs.k8s.io/)
@@ -25,7 +25,7 @@ Kafka-to-S3 pipeline that reads Avro messages from Kafka, enriches them with Kaf
 ./scripts/build-and-run.sh
 ```
 
-This builds the JAR and Docker images, starts all services (Kafka, ZooKeeper, MinIO, Flink, data generator), and submits the Flink job. Wait ~2 minutes for data to appear in MinIO.
+This builds the JARs and Docker images, starts all services (Kafka, ZooKeeper, MinIO, Flink producer, Flink consumer), and submits the Flink job. Wait ~2 minutes for data to appear in MinIO.
 
 ## Kubernetes Deployment (Kind)
 
@@ -43,7 +43,7 @@ Creates a Kind cluster, the `flink-lineage` namespace, and installs the Flink Ku
 scripts/deploy.sh local
 ```
 
-Builds the JAR and Docker images, loads them into Kind, and deploys the Helm chart. This starts Kafka (KRaft mode), MinIO, the Flink job (via FlinkDeployment CRD), and the data generator.
+Builds the JARs and Docker images, loads them into Kind, and deploys the Helm chart. This starts Kafka (KRaft mode), MinIO, and both FlinkDeployments (producer and consumer) via the Flink Kubernetes Operator.
 
 ### 3. Verify
 
@@ -81,13 +81,12 @@ kind delete cluster --name flink-lineage
 - An MSK cluster with TLS listeners (port 9094)
 - S3 buckets for data output and commit log
 - An IAM role with S3 access and an OIDC trust policy for IRSA
-- ECR repositories for `flink-lineage` and `flink-lineage-data-generator`
+- An ECR repository for `flink-lineage`
 
-### 1. Create ECR repositories
+### 1. Create ECR repository
 
 ```bash
 aws ecr create-repository --repository-name flink-lineage --region us-east-1
-aws ecr create-repository --repository-name flink-lineage-data-generator --region us-east-1
 ```
 
 ### 2. Install the Flink Operator
@@ -114,7 +113,7 @@ Update `helm/flink-lineage/values-aws.yaml` with your:
 ECR_REGISTRY=<account-id>.dkr.ecr.<region>.amazonaws.com AWS_REGION=<region> scripts/deploy.sh aws
 ```
 
-This builds the JAR and Docker images (targeting `linux/amd64`), pushes to ECR, and deploys the Helm chart with `values-aws.yaml`.
+This builds the JARs and Docker image (targeting `linux/amd64`), pushes to ECR, and deploys the Helm chart with `values-aws.yaml`. Both the producer and consumer run from the same Docker image with different `entryClass` configurations.
 
 ### 5. Verify
 
@@ -141,13 +140,16 @@ kubectl delete namespace flink-lineage
 ## Architecture
 
 ```
+Flink ProducerJob (DataGeneratorSource, ~10 msgs/sec)
+    |
+    v
 Kafka (lineage-input topic, 10 partitions)
     |
     v
-Flink: RawKafkaDeserializer (pass-through ConsumerRecord)
+Flink LineageJob: RawKafkaDeserializer (pass-through ConsumerRecord)
     |
     v
-Flink: EnrichFunction
+Flink LineageJob: EnrichFunction
   - Deserializes Avro, adds kafka_topic/partition/offset
     |
     v
@@ -163,8 +165,8 @@ FileSink --> s3://flink-data/output/                    (enriched data, partitio
 
 ### Data Flow
 
-- **Data generator**: Produces ~10 Avro messages/sec across 10 Kafka partitions
-- **Flink job**: Consumes from Kafka, enriches with metadata, writes Parquet to S3
+- **Flink producer** (`ProducerJob`): Generates Avro messages at a configurable rate using `DataGeneratorSource` and writes them to Kafka via `KafkaSink`
+- **Flink consumer** (`LineageJob`): Consumes from Kafka, enriches with metadata, writes Parquet to S3
 - **Data sink**: Full enriched records partitioned by `year=/month=/day=/hour=`
 - **Write-ahead commit log**: CSV files mapping each checkpoint to its committed S3 data files (written eagerly in `processElement()` before checkpoint completes; may contain entries for failed checkpoints, consumers filter by checking if the referenced s3_key exists)
 
@@ -229,9 +231,40 @@ docker compose cp minio:/tmp/wal /tmp/write-ahead-commit-log
 cat /tmp/write-ahead-commit-log/chk-5/subtask-*.csv
 ```
 
+### Offset Gap Verification
+
+Use `scripts/check-offset-gaps.sh` to verify there are no missing Kafka offsets across a range of checkpoints. The script reads the write-ahead commit log, downloads the referenced parquet files (both output and dropped), and uses DuckDB to check for gaps.
+
+```bash
+# Usage: ./scripts/check-offset-gaps.sh <docker|kind|aws> <start_checkpoint> <end_checkpoint>
+
+# Docker Compose
+./scripts/check-offset-gaps.sh docker 1 4
+
+# Kind
+./scripts/check-offset-gaps.sh kind 1 4
+
+# AWS
+./scripts/check-offset-gaps.sh aws 1 4
+
+# Override WAL path
+WAL_S3_PATH=s3://my-bucket/wal ./scripts/check-offset-gaps.sh aws 1 4
+```
+
+Requires [DuckDB](https://duckdb.org/) (`brew install duckdb`).
+
 ## Configuration
 
-Environment variables (set in `docker-compose.yml`):
+### Producer (`ProducerJob`)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `KAFKA_BOOTSTRAP_SERVERS` | `kafka:9092` | Kafka broker address |
+| `KAFKA_TOPIC` | `lineage-input` | Target Kafka topic |
+| `KAFKA_SECURITY_PROTOCOL` | `PLAINTEXT` | Kafka security protocol (`PLAINTEXT` or `SSL` for MSK TLS) |
+| `RATE_PER_SEC` | `10` | Message generation rate per second |
+
+### Consumer (`LineageJob`)
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -254,10 +287,6 @@ Flink settings are in `flink-conf/flink-conf.yaml`:
 flink-lineage/
 ├── avro/
 │   └── input_event.avsc              # Avro schema for source messages
-├── data-generator/
-│   ├── Dockerfile
-│   ├── generator.py                   # Kafka producer (10 msgs/sec)
-│   └── requirements.txt
 ├── flink-conf/
 │   └── flink-conf.yaml               # Flink runtime configuration
 ├── flink-job/
@@ -265,11 +294,16 @@ flink-lineage/
 │   └── src/main/java/com/lineage/
 │       ├── AvroSchema.java                        # Schema definitions (input, enriched)
 │       ├── WriteAheadCommitLogOperator.java       # Pre-commit operator (eager CSV write-ahead commit log)
-│       ├── WriteAheadCommitLogFileSink.java        # FileSink wrapper with write-ahead commit log topology
+│       ├── WriteAheadCommitLogFileSink.java       # FileSink wrapper with write-ahead commit log topology
 │       ├── EnrichFunction.java                    # Avro deserialization + Kafka metadata enrichment
 │       ├── EnrichedEvent.java                     # Enriched event POJO
 │       ├── InputEvent.java                        # Input event POJO
 │       └── LineageJob.java                        # Main Flink job (source, sink, wiring)
+├── flink-producer/
+│   ├── pom.xml
+│   └── src/main/java/com/lineage/producer/
+│       ├── ProducerJob.java                       # Flink DataGeneratorSource → KafkaSink
+│       └── ByteArraySerializationSchema.java      # Byte array passthrough serializer
 ├── helm/flink-lineage/
 │   ├── Chart.yaml
 │   ├── values.yaml                       # Base defaults
@@ -279,12 +313,13 @@ flink-lineage/
 │       ├── _helpers.tpl                  # Naming, labels helpers
 │       ├── serviceaccount.yaml           # With optional IRSA annotation
 │       ├── rbac.yaml                     # Role/RoleBinding for Flink pods
-│       ├── flink-deployment.yaml         # FlinkDeployment CRD
-│       ├── data-generator.yaml           # Python data generator Deployment
+│       ├── flink-deployment.yaml         # FlinkDeployment CRD (consumer)
+│       ├── flink-producer.yaml           # FlinkDeployment CRD (producer)
 │       ├── kafka.yaml                    # Kafka StatefulSet (local dev)
 │       └── minio.yaml                    # MinIO Deployment + init Job (local dev)
 ├── scripts/
 │   ├── build-and-run.sh              # Docker Compose build and deploy
+│   ├── check-offset-gaps.sh          # Verify no offset gaps across checkpoints
 │   ├── kind-setup.sh                 # Create Kind cluster + install operator
 │   └── deploy.sh                     # Build images, load/push, helm install
 ├── docker-compose.yml
