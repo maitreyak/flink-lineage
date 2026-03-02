@@ -15,6 +15,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.UUID;
 
 /**
  * Operator in the FileSink pre-commit topology that extracts
@@ -83,8 +84,9 @@ public class WriteAheadCommitLogOperator
     }
 
     private void writeCsv(long checkpointId, String s3Key, long commitTimestamp) throws Exception {
-        String filePath = String.format("%s/chk-%d/%s-subtask-%d.csv",
-                commitLogBasePath, checkpointId, filePrefix, subtaskIndex);
+        String filePath = String.format("%s/chk-%d/%s-subtask-%d-%s.csv",
+                commitLogBasePath, checkpointId, filePrefix, subtaskIndex,
+                UUID.randomUUID());
 
         StringBuilder csv = new StringBuilder();
         csv.append("checkpoint_id,s3_key,commit_timestamp\n");

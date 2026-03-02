@@ -116,6 +116,23 @@ else
   # local/kind: download files via kubectl/docker, then load into DuckDB
   # ---------------------------------------------------------------------------
 
+  # Helper: list CSV filenames in a checkpoint directory
+  list_csvs() {
+    local s3_dir="$1"
+    case "${ENV_TYPE}" in
+      compose)
+        local minio_path="local/${s3_dir#s3://}"
+        docker compose exec -T minio mc ls "${minio_path}" 2>/dev/null | awk '{print $NF}' | grep '\.csv$' || true
+        ;;
+      kind)
+        local minio_pod
+        minio_pod=$(kubectl get pod -n "${NAMESPACE}" -l app.kubernetes.io/component=minio -o jsonpath='{.items[0].metadata.name}')
+        local minio_path="local/${s3_dir#s3://}"
+        kubectl exec -n "${NAMESPACE}" "${minio_pod}" -- mc ls "${minio_path}" 2>/dev/null | awk '{print $NF}' | grep '\.csv$' || true
+        ;;
+    esac
+  }
+
   # Helper: read a file from object storage to stdout
   read_file() {
     local s3_path="$1"
@@ -162,23 +179,20 @@ else
   DROPPED_FILES=""
 
   for chk in $(seq "${START_CHK}" "${END_CHK}"); do
-    for st in $(seq 0 15); do
-      # Output files
-      csv=$(read_file "${WAL_S3_PATH}/chk-${chk}/output-subtask-${st}.csv" || true)
+    chk_dir="${WAL_S3_PATH}/chk-${chk}/"
+    for csv_name in $(list_csvs "${chk_dir}"); do
+      csv=$(read_file "${WAL_S3_PATH}/chk-${chk}/${csv_name}" || true)
       if [[ -n "${csv}" ]]; then
         paths=$(echo "${csv}" | tail -n +2 | cut -d',' -f2)
-        for p in ${paths}; do
-          OUTPUT_FILES="${OUTPUT_FILES} ${p}"
-        done
-      fi
-
-      # Dropped files
-      csv=$(read_file "${WAL_S3_PATH}/chk-${chk}/dropped-subtask-${st}.csv" || true)
-      if [[ -n "${csv}" ]]; then
-        paths=$(echo "${csv}" | tail -n +2 | cut -d',' -f2)
-        for p in ${paths}; do
-          DROPPED_FILES="${DROPPED_FILES} ${p}"
-        done
+        if [[ "${csv_name}" == output-* ]]; then
+          for p in ${paths}; do
+            OUTPUT_FILES="${OUTPUT_FILES} ${p}"
+          done
+        elif [[ "${csv_name}" == dropped-* ]]; then
+          for p in ${paths}; do
+            DROPPED_FILES="${DROPPED_FILES} ${p}"
+          done
+        fi
       fi
     done
   done
