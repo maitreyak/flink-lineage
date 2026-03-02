@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-CHART_DIR="${PROJECT_DIR}/helm/flink-lineage"
 NAMESPACE="flink-lineage"
 RELEASE_NAME="flink-lineage"
 
@@ -14,9 +11,7 @@ if [[ -z "${ENV}" ]]; then
 fi
 
 case "${ENV}" in
-  local|aws)
-    VALUES_FILE="${CHART_DIR}/values-${ENV}.yaml"
-    ;;
+  local|aws) ;;
   *)
     echo "Unknown environment: ${ENV}"
     echo "Usage: $0 <local|aws>"
@@ -25,11 +20,15 @@ case "${ENV}" in
 esac
 
 echo "=== Suspending Flink jobs (${ENV}) ==="
-helm upgrade "${RELEASE_NAME}" "${CHART_DIR}" \
-  --namespace "${NAMESPACE}" \
-  --reuse-values \
-  --set flink.job.state=suspended \
-  --set flinkProducer.job.state=suspended
+kubectl patch flinkdeployment "${RELEASE_NAME}" \
+  -n "${NAMESPACE}" \
+  --type merge \
+  -p '{"spec":{"job":{"state":"suspended"}}}'
+
+kubectl patch flinkdeployment "${RELEASE_NAME}-producer" \
+  -n "${NAMESPACE}" \
+  --type merge \
+  -p '{"spec":{"job":{"state":"suspended"}}}'
 
 echo ""
 echo "=== Suspend initiated ==="
