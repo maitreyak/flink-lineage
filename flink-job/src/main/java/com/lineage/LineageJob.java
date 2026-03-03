@@ -45,6 +45,8 @@ public class LineageJob {
             "WRITE_AHEAD_COMMIT_LOG_PATH", "s3://flink-data/write-ahead-commit-log");
     private static final String DROPPED_PATH = System.getenv().getOrDefault(
             "DROPPED_PATH", "s3://flink-data/dropped");
+    private static final String KAFKA_GROUP_ID = System.getenv().getOrDefault(
+            "KAFKA_GROUP_ID", "flink-lineage-consumer");
     private static final String KAFKA_SECURITY_PROTOCOL = System.getenv().getOrDefault(
             "KAFKA_SECURITY_PROTOCOL", "PLAINTEXT");
 
@@ -56,7 +58,7 @@ public class LineageJob {
                 .<ConsumerRecord<byte[], byte[]>>builder()
                 .setBootstrapServers(KAFKA_BOOTSTRAP)
                 .setTopics(KAFKA_TOPIC)
-                .setGroupId("flink-lineage-consumer")
+                .setGroupId(KAFKA_GROUP_ID)
                 .setStartingOffsets(OffsetsInitializer.earliest())
                 .setDeserializer(new RawKafkaDeserializer());
 
