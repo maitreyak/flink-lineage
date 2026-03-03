@@ -3,14 +3,14 @@ set -euo pipefail
 
 # Check for offset gaps in parquet files referenced by the write-ahead commit log.
 #
-# Usage: ./check-offset-gaps.sh <docker|kind|aws> <start_checkpoint> <end_checkpoint>
+# Usage: ./check-offset-gaps.sh <docker|aws> <start_checkpoint> <end_checkpoint>
 #
 # Reads commit log CSVs, downloads the referenced parquet files, and uses
 # DuckDB to verify there are no missing offsets per Kafka partition when
 # output + dropped records are combined.
 #
 # AWS mode uses DuckDB's native S3 support (httpfs) to read files directly,
-# avoiding slow sequential downloads. Local/Kind modes download via kubectl/docker.
+# avoiding slow sequential downloads. Docker Compose mode downloads via docker.
 #
 # Override WAL path with: WAL_S3_PATH=s3://my-bucket/wal ./check-offset-gaps.sh aws 1 4
 
@@ -19,13 +19,13 @@ START_CHK="${2:-}"
 END_CHK="${3:-}"
 
 if [[ -z "${ENV_TYPE}" || -z "${START_CHK}" || -z "${END_CHK}" ]]; then
-  echo "Usage: $0 <docker|kind|aws> <start_checkpoint> <end_checkpoint>"
+  echo "Usage: $0 <docker|aws> <start_checkpoint> <end_checkpoint>"
   echo "Example: $0 docker 1 4"
   exit 1
 fi
 
-if [[ "${ENV_TYPE}" != "docker" && "${ENV_TYPE}" != "kind" && "${ENV_TYPE}" != "aws" ]]; then
-  echo "ERROR: Invalid environment '${ENV_TYPE}'. Must be one of: docker, kind, aws"
+if [[ "${ENV_TYPE}" != "docker" && "${ENV_TYPE}" != "aws" ]]; then
+  echo "ERROR: Invalid environment '${ENV_TYPE}'. Must be one of: docker, aws"
   exit 1
 fi
 
@@ -49,7 +49,7 @@ echo "Environment: ${ENV_TYPE}"
 # Set WAL S3 path per environment (can be overridden via WAL_S3_PATH env var)
 if [[ -z "${WAL_S3_PATH:-}" ]]; then
   case "${ENV_TYPE}" in
-    compose|kind) WAL_S3_PATH="s3://flink-data/write-ahead-commit-log" ;;
+    compose) WAL_S3_PATH="s3://flink-data/write-ahead-commit-log" ;;
     aws)          WAL_S3_PATH="s3://flink-commit-log/write-ahead-commit-log" ;;
   esac
 fi
@@ -121,66 +121,30 @@ EOSQL
 
 else
   # ---------------------------------------------------------------------------
-  # local/kind: download files via kubectl/docker, then load into DuckDB
+  # Docker Compose: download files via docker, then load into DuckDB
   # ---------------------------------------------------------------------------
 
   # Helper: list CSV filenames in a checkpoint directory
   list_csvs() {
     local s3_dir="$1"
-    case "${ENV_TYPE}" in
-      compose)
-        local minio_path="local/${s3_dir#s3://}"
-        docker compose exec -T minio mc ls "${minio_path}" 2>/dev/null | awk '{print $NF}' | grep '\.csv$' || true
-        ;;
-      kind)
-        local minio_pod
-        minio_pod=$(kubectl get pod -n "${NAMESPACE}" -l app.kubernetes.io/component=minio -o jsonpath='{.items[0].metadata.name}')
-        local minio_path="local/${s3_dir#s3://}"
-        kubectl exec -n "${NAMESPACE}" "${minio_pod}" -- mc ls "${minio_path}" 2>/dev/null | awk '{print $NF}' | grep '\.csv$' || true
-        ;;
-    esac
+    local minio_path="local/${s3_dir#s3://}"
+    docker compose exec -T minio mc ls "${minio_path}" 2>/dev/null | awk '{print $NF}' | grep '\.csv$' || true
   }
 
   # Helper: read a file from object storage to stdout
   read_file() {
     local s3_path="$1"
-    case "${ENV_TYPE}" in
-      compose)
-        local minio_path="local/${s3_path#s3://}"
-        docker compose exec -T minio mc cat "${minio_path}" 2>/dev/null
-        ;;
-      kind)
-        local minio_pod
-        minio_pod=$(kubectl get pod -n "${NAMESPACE}" -l app.kubernetes.io/component=minio -o jsonpath='{.items[0].metadata.name}')
-        local minio_path="local/${s3_path#s3://}"
-        kubectl exec -n "${NAMESPACE}" "${minio_pod}" -- mc cat "${minio_path}" 2>/dev/null
-        ;;
-    esac
+    local minio_path="local/${s3_path#s3://}"
+    docker compose exec -T minio mc cat "${minio_path}" 2>/dev/null
   }
 
   # Helper: download a file from object storage to a local path
   download_file() {
     local s3_path="$1"
     local local_path="$2"
-    case "${ENV_TYPE}" in
-      compose)
-        local minio_path="local/${s3_path#s3://}"
-        docker compose exec -T minio mc cat "${minio_path}" > "${local_path}" 2>/dev/null
-        ;;
-      kind)
-        local minio_pod
-        minio_pod=$(kubectl get pod -n "${NAMESPACE}" -l app.kubernetes.io/component=minio -o jsonpath='{.items[0].metadata.name}')
-        local minio_path="local/${s3_path#s3://}"
-        kubectl exec -n "${NAMESPACE}" "${minio_pod}" -- mc cat "${minio_path}" > "${local_path}" 2>/dev/null
-        ;;
-    esac
+    local minio_path="local/${s3_path#s3://}"
+    docker compose exec -T minio mc cat "${minio_path}" > "${local_path}" 2>/dev/null
   }
-
-  # Ensure mc alias is configured for Kind
-  if [[ "${ENV_TYPE}" == "kind" ]]; then
-    local_minio_pod=$(kubectl get pod -n "${NAMESPACE}" -l app.kubernetes.io/component=minio -o jsonpath='{.items[0].metadata.name}')
-    kubectl exec -n "${NAMESPACE}" "${local_minio_pod}" -- mc alias set local http://localhost:9000 minioadmin minioadmin >/dev/null 2>&1 || true
-  fi
 
   # Step 1: Collect all parquet file S3 paths from commit log CSVs
   OUTPUT_FILES=""

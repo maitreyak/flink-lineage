@@ -34,16 +34,6 @@ flinkProducer:
     upgradeMode: stateless
     state: running
 
-kafka:
-  enabled: false
-  image: "apache/kafka:3.9.0"
-
-minio:
-  enabled: false
-  image: "minio/minio:latest"
-  rootUser: minioadmin
-  rootPassword: minioadmin
-
 flink:
   version: v1_19
 

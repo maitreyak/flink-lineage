@@ -6,15 +6,15 @@ RELEASE_NAME="flink-lineage"
 
 ENV="${1:-}"
 if [[ -z "${ENV}" ]]; then
-  echo "Usage: $0 <local|aws>"
+  echo "Usage: $0 <aws>"
   exit 1
 fi
 
 case "${ENV}" in
-  local|aws) ;;
+  aws) ;;
   *)
     echo "Unknown environment: ${ENV}"
-    echo "Usage: $0 <local|aws>"
+    echo "Usage: $0 <aws>"
     exit 1
     ;;
 esac

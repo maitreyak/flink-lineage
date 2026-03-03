@@ -9,7 +9,7 @@ RELEASE_NAME="flink-lineage"
 
 ENV="${1:-}"
 if [[ -z "${ENV}" ]]; then
-  echo "Usage: $0 [local|aws]"
+  echo "Usage: $0 [aws]"
   exit 1
 fi
 
@@ -26,18 +26,6 @@ echo "=== Building Docker image ==="
 docker build ${PLATFORM_FLAG} -t flink-lineage:latest -f "${PROJECT_DIR}/Dockerfile.flink" "${PROJECT_DIR}"
 
 case "${ENV}" in
-  local)
-    CLUSTER_NAME="${KIND_CLUSTER_NAME:-flink-lineage}"
-    echo "=== Loading image into Kind cluster '${CLUSTER_NAME}' ==="
-    kind load docker-image flink-lineage:latest --name "${CLUSTER_NAME}"
-
-    echo "=== Deploying with Helm (local) ==="
-    helm upgrade --install "${RELEASE_NAME}" "${CHART_DIR}" \
-      --namespace "${NAMESPACE}" \
-      --values "${CHART_DIR}/values.yaml" \
-      --values "${CHART_DIR}/values-local.yaml"
-    ;;
-
   aws)
     ECR_REGISTRY="${ECR_REGISTRY:-605618833247.dkr.ecr.us-east-1.amazonaws.com}"
     AWS_REGION="${AWS_REGION:-us-east-1}"
@@ -58,7 +46,7 @@ case "${ENV}" in
 
   *)
     echo "Unknown environment: ${ENV}"
-    echo "Usage: $0 [local|aws]"
+    echo "Usage: $0 [aws]"
     exit 1
     ;;
 esac

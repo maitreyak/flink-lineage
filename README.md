@@ -9,11 +9,6 @@ Kafka-to-S3 pipeline that reads Avro messages from Kafka, enriches them with Kaf
 - Maven 3.6+
 - [DuckDB](https://duckdb.org/) (for offset gap verification: `brew install duckdb`)
 
-**For Kubernetes deployment (Kind):**
-- [kind](https://kind.sigs.k8s.io/)
-- [kubectl](https://kubernetes.io/docs/tasks/tools/)
-- [Helm](https://helm.sh/)
-
 **For AWS deployment (EKS):**
 - [AWS CLI](https://aws.amazon.com/cli/)
 - [kubectl](https://kubernetes.io/docs/tasks/tools/) configured for EKS
@@ -26,54 +21,6 @@ Kafka-to-S3 pipeline that reads Avro messages from Kafka, enriches them with Kaf
 ```
 
 This builds the JARs and Docker images, starts all services (Kafka, ZooKeeper, MinIO, Flink producer, Flink consumer), and submits the Flink job. Wait ~2 minutes for data to appear in MinIO.
-
-## Kubernetes Deployment (Kind)
-
-### 1. Create the cluster
-
-```bash
-scripts/kind-setup.sh
-```
-
-Creates a Kind cluster, the `flink-lineage` namespace, and installs the Flink Kubernetes Operator.
-
-### 2. Build and deploy
-
-```bash
-scripts/deploy.sh local
-```
-
-Builds the JARs and Docker images, loads them into Kind, and deploys the Helm chart. This starts Kafka (KRaft mode), MinIO, and both FlinkDeployments (producer and consumer) via the Flink Kubernetes Operator.
-
-### 3. Verify
-
-```bash
-# All pods should be Running
-kubectl get pods -n flink-lineage
-
-# FlinkDeployment should show RUNNING / STABLE
-kubectl get flinkdeployment -n flink-lineage
-```
-
-### 4. Access UIs
-
-```bash
-# Flink Consumer Web UI — http://localhost:8081
-kubectl port-forward svc/flink-lineage-rest 8081:8081 -n flink-lineage
-
-# Flink Producer Web UI — http://localhost:8082
-kubectl port-forward svc/flink-lineage-producer-rest 8082:8081 -n flink-lineage
-
-# MinIO Console — http://localhost:9001 (minioadmin / minioadmin)
-kubectl port-forward svc/minio 9001:9001 -n flink-lineage
-```
-
-### 5. Tear down
-
-```bash
-helm uninstall flink-lineage -n flink-lineage
-kind delete cluster --name flink-lineage
-```
 
 ## AWS Deployment (EKS + MSK + S3)
 
@@ -183,14 +130,6 @@ FileSink --> s3://flink-data/output/                    (enriched data, partitio
 | MinIO Console | http://localhost:9001 | minioadmin / minioadmin |
 | Kafka | localhost:29092 (host) / kafka:9092 (internal) | - |
 
-**Kubernetes — Kind (via port-forward):**
-
-| Service | Command | URL |
-|---------|---------|-----|
-| Flink Consumer UI | `kubectl port-forward svc/flink-lineage-rest 8081:8081 -n flink-lineage` | http://localhost:8081 |
-| Flink Producer UI | `kubectl port-forward svc/flink-lineage-producer-rest 8082:8081 -n flink-lineage` | http://localhost:8082 |
-| MinIO Console | `kubectl port-forward svc/minio 9001:9001 -n flink-lineage` | http://localhost:9001 |
-
 **Kubernetes — AWS EKS (via port-forward):**
 
 | Service | Command | URL |
@@ -241,13 +180,10 @@ cat /tmp/write-ahead-commit-log/chk-5/subtask-*.csv
 Use `scripts/check-offset-gaps.sh` to verify there are no missing Kafka offsets across a range of checkpoints. The script reads the write-ahead commit log, downloads the referenced parquet files (both output and dropped), and uses DuckDB to check for gaps.
 
 ```bash
-# Usage: ./scripts/check-offset-gaps.sh <docker|kind|aws> <start_checkpoint> <end_checkpoint>
+# Usage: ./scripts/check-offset-gaps.sh <docker|aws> <start_checkpoint> <end_checkpoint>
 
 # Docker Compose
 ./scripts/check-offset-gaps.sh docker 1 4
-
-# Kind
-./scripts/check-offset-gaps.sh kind 1 4
 
 # AWS
 ./scripts/check-offset-gaps.sh aws 1 4
@@ -312,21 +248,17 @@ flink-lineage/
 ├── helm/flink-lineage/
 │   ├── Chart.yaml
 │   ├── values.yaml                       # Base defaults
-│   ├── values-local.yaml                 # Kind + MinIO overrides
 │   ├── values-aws.yaml                   # EKS + MSK + IRSA overrides
 │   └── templates/
 │       ├── _helpers.tpl                  # Naming, labels helpers
 │       ├── serviceaccount.yaml           # With optional IRSA annotation
 │       ├── rbac.yaml                     # Role/RoleBinding for Flink pods
 │       ├── flink-deployment.yaml         # FlinkDeployment CRD (consumer)
-│       ├── flink-producer.yaml           # FlinkDeployment CRD (producer)
-│       ├── kafka.yaml                    # Kafka StatefulSet (local dev)
-│       └── minio.yaml                    # MinIO Deployment + init Job (local dev)
+│       └── flink-producer.yaml           # FlinkDeployment CRD (producer)
 ├── scripts/
 │   ├── build-and-run.sh              # Docker Compose build and deploy
 │   ├── check-offset-gaps.sh          # Verify no offset gaps across checkpoints
-│   ├── kind-setup.sh                 # Create Kind cluster + install operator
-│   └── deploy.sh                     # Build images, load/push, helm install
+│   └── deploy.sh                     # Build images, push to ECR, helm install
 ├── docker-compose.yml
 ├── Dockerfile.flink
 └── README.md
@@ -339,13 +271,6 @@ flink-lineage/
 ```bash
 docker compose down       # keep data
 docker compose down -v    # remove MinIO data volume
-```
-
-**Kubernetes (Kind):**
-
-```bash
-helm uninstall flink-lineage -n flink-lineage
-kind delete cluster --name flink-lineage
 ```
 
 **Kubernetes (AWS EKS):**
