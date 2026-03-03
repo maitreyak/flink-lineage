@@ -22,12 +22,12 @@ esac
 echo "=== Suspending Flink jobs (${ENV}) ==="
 kubectl patch flinkdeployment "${RELEASE_NAME}" \
   -n "${NAMESPACE}" \
-  --type merge \
+  --type merge --field-manager=helm \
   -p '{"spec":{"job":{"state":"suspended"}}}'
 
 kubectl patch flinkdeployment "${RELEASE_NAME}-producer" \
   -n "${NAMESPACE}" \
-  --type merge \
+  --type merge --field-manager=helm \
   -p '{"spec":{"job":{"state":"suspended"}}}'
 
 echo ""

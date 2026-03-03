@@ -22,12 +22,12 @@ esac
 echo "=== Resuming Flink jobs (${ENV}) ==="
 kubectl patch flinkdeployment "${RELEASE_NAME}" \
   -n "${NAMESPACE}" \
-  --type merge \
+  --type merge --field-manager=helm \
   -p '{"spec":{"job":{"state":"running"}}}'
 
 kubectl patch flinkdeployment "${RELEASE_NAME}-producer" \
   -n "${NAMESPACE}" \
-  --type merge \
+  --type merge --field-manager=helm \
   -p '{"spec":{"job":{"state":"running"}}}'
 
 echo ""
