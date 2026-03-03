@@ -51,7 +51,7 @@ case "${ENV}" in
     # Delete FlinkDeployments to avoid field manager conflicts from kubectl-patch
     # (suspend/resume workflow). Helm will recreate them and the Flink operator
     # restarts jobs from the latest checkpoint.
-    kubectl delete flinkdeployment --all -n "${NAMESPACE}" --wait=false 2>/dev/null || true
+    kubectl delete flinkdeployment --all -n "${NAMESPACE}" --wait 2>/dev/null || true
 
     echo "=== Deploying with Helm (aws) ==="
     helm upgrade --install "${RELEASE_NAME}" "${CHART_DIR}" \
