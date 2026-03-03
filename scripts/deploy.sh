@@ -39,14 +39,19 @@ case "${ENV}" in
     ;;
 
   aws)
-    ECR_REGISTRY="${ECR_REGISTRY:?ECR_REGISTRY must be set}"
-    AWS_REGION="${AWS_REGION:?AWS_REGION must be set}"
+    ECR_REGISTRY="${ECR_REGISTRY:-605618833247.dkr.ecr.us-east-1.amazonaws.com}"
+    AWS_REGION="${AWS_REGION:-us-east-1}"
 
     echo "=== Pushing images to ECR ==="
     aws ecr get-login-password --region "${AWS_REGION}" | docker login --username AWS --password-stdin "${ECR_REGISTRY}"
 
     docker tag flink-lineage:latest "${ECR_REGISTRY}/flink-lineage:latest"
     docker push "${ECR_REGISTRY}/flink-lineage:latest"
+
+    # Delete FlinkDeployments to avoid field manager conflicts from kubectl-patch
+    # (suspend/resume workflow). Helm will recreate them and the Flink operator
+    # restarts jobs from the latest checkpoint.
+    kubectl delete flinkdeployment --all -n "${NAMESPACE}" --wait=false 2>/dev/null || true
 
     echo "=== Deploying with Helm (aws) ==="
     helm upgrade --install "${RELEASE_NAME}" "${CHART_DIR}" \
