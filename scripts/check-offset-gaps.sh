@@ -3,7 +3,13 @@ set -euo pipefail
 
 # Check for offset gaps in parquet files referenced by the write-ahead commit log.
 #
-# Usage: ./check-offset-gaps.sh <docker|aws> <start_checkpoint> <end_checkpoint>
+# Usage: ./check-offset-gaps.sh <docker|aws> <start_date> <end_date>
+#   Date formats: 'MM-DD-YYYY' (full day) or 'MM-DD-YYYY HH:MM' (minute-level)
+#
+# Examples:
+#   $0 aws '03-03-2026' '03-03-2026'
+#   $0 aws '03-03-2026 21:37' '03-03-2026 21:39'
+#   $0 docker '03-03-2026' '03-03-2026'
 #
 # Reads commit log CSVs, downloads the referenced parquet files, and uses
 # DuckDB to verify there are no missing offsets per Kafka partition when
@@ -12,15 +18,18 @@ set -euo pipefail
 # AWS mode uses DuckDB's native S3 support (httpfs) to read files directly,
 # avoiding slow sequential downloads. Docker Compose mode downloads via docker.
 #
-# Override WAL path with: WAL_S3_PATH=s3://my-bucket/wal ./check-offset-gaps.sh aws 1 4
+# Override WAL path with: WAL_S3_PATH=s3://my-bucket/wal ./check-offset-gaps.sh aws '03-03-2026' '03-03-2026'
 
 ENV_TYPE="${1:-}"
-START_CHK="${2:-}"
-END_CHK="${3:-}"
+START_DATE="${2:-}"
+END_DATE="${3:-}"
 
-if [[ -z "${ENV_TYPE}" || -z "${START_CHK}" || -z "${END_CHK}" ]]; then
-  echo "Usage: $0 <docker|aws> <start_checkpoint> <end_checkpoint>"
-  echo "Example: $0 docker 1 4"
+if [[ -z "${ENV_TYPE}" || -z "${START_DATE}" || -z "${END_DATE}" ]]; then
+  echo "Usage: $0 <docker|aws> <start_date> <end_date>"
+  echo "  Date formats: 'MM-DD-YYYY' (full day) or 'MM-DD-YYYY HH:MM' (minute-level)"
+  echo "Examples:"
+  echo "  $0 aws '03-03-2026' '03-03-2026'"
+  echo "  $0 aws '03-03-2026 21:37' '03-03-2026 21:39'"
   exit 1
 fi
 
@@ -33,6 +42,38 @@ if ! command -v duckdb &>/dev/null; then
   echo "ERROR: duckdb is not installed. Install it with: brew install duckdb"
   exit 1
 fi
+
+# Detect date-only vs date+time format
+HAS_TIME=false
+if [[ "${START_DATE}" =~ ^[0-9]{2}-[0-9]{2}-[0-9]{4}\ [0-9]{2}:[0-9]{2}$ ]]; then
+  HAS_TIME=true
+fi
+
+# Convert dates to epoch milliseconds for commit_timestamp filtering (macOS compatible)
+if [[ "${HAS_TIME}" == true ]]; then
+  START_EPOCH=$(date -j -f '%m-%d-%Y %H:%M' "${START_DATE}" +%s)
+  END_EPOCH=$(date -j -f '%m-%d-%Y %H:%M' "${END_DATE}" +%s)
+  START_EPOCH_MS=$(( START_EPOCH * 1000 ))
+  END_EPOCH_MS=$(( (END_EPOCH + 60) * 1000 - 1 ))
+  START_DAY=$(date -j -f '%m-%d-%Y %H:%M' "${START_DATE}" +%m-%d-%Y)
+  END_DAY=$(date -j -f '%m-%d-%Y %H:%M' "${END_DATE}" +%m-%d-%Y)
+else
+  START_DAY="${START_DATE}"
+  END_DAY="${END_DATE}"
+fi
+
+# Enumerate each day in the range as MM-DD-YYYY strings (one per line)
+build_days() {
+  local start_epoch end_epoch current
+  start_epoch=$(date -j -f '%m-%d-%Y' "${START_DAY}" +%s)
+  end_epoch=$(date -j -f '%m-%d-%Y' "${END_DAY}" +%s)
+
+  current=$start_epoch
+  while [[ $current -le $end_epoch ]]; do
+    date -j -r "$current" +%m-%d-%Y
+    current=$((current + 86400))
+  done
+}
 
 WORK_DIR=$(mktemp -d)
 trap 'rm -rf "${WORK_DIR}"' EXIT
@@ -50,12 +91,12 @@ echo "Environment: ${ENV_TYPE}"
 if [[ -z "${WAL_S3_PATH:-}" ]]; then
   case "${ENV_TYPE}" in
     compose) WAL_S3_PATH="s3://flink-data/write-ahead-commit-log" ;;
-    aws)          WAL_S3_PATH="s3://flink-commit-log/write-ahead-commit-log" ;;
+    aws)     WAL_S3_PATH="s3://flink-commit-log/write-ahead-commit-log" ;;
   esac
 fi
 
 echo "WAL path: ${WAL_S3_PATH}"
-echo "Checking offset gaps for checkpoints ${START_CHK} to ${END_CHK}..."
+echo "Checking offset gaps for ${START_DATE} to ${END_DATE}..."
 echo ""
 
 DB_FILE="${WORK_DIR}/analysis.duckdb"
@@ -64,6 +105,20 @@ if [[ "${ENV_TYPE}" == "aws" ]]; then
   # ---------------------------------------------------------------------------
   # AWS: DuckDB reads commit log CSVs and parquet files directly from S3
   # ---------------------------------------------------------------------------
+
+  # Build DuckDB glob list from per-day paths
+  GLOB_LIST=""
+  for day in $(build_days); do
+    if [[ -n "${GLOB_LIST}" ]]; then GLOB_LIST+=", "; fi
+    GLOB_LIST+="'${WAL_S3_PATH}/${day}/**/*.csv'"
+  done
+
+  # Add WHERE clause for time filtering when HH:MM is specified
+  TIME_FILTER=""
+  if [[ "${HAS_TIME}" == true ]]; then
+    TIME_FILTER="WHERE commit_timestamp BETWEEN ${START_EPOCH_MS} AND ${END_EPOCH_MS}"
+  fi
+
   duckdb "${DB_FILE}" <<EOSQL
 .output /dev/null
 INSTALL httpfs;
@@ -75,8 +130,8 @@ SELECT
     checkpoint_id,
     s3_key,
     CASE WHEN filename LIKE '%/output-%' THEN 'output' ELSE 'dropped' END AS source
-FROM read_csv_auto('${WAL_S3_PATH}/**/*.csv', filename=true)
-WHERE checkpoint_id BETWEEN ${START_CHK} AND ${END_CHK};
+FROM read_csv_auto([${GLOB_LIST}], filename=true)
+${TIME_FILTER};
 
 SET VARIABLE parquet_files = (SELECT list(DISTINCT s3_key) FROM commit_log);
 
@@ -117,10 +172,14 @@ else
   # Docker Compose: download files via docker, then load into DuckDB
   # ---------------------------------------------------------------------------
 
-  # Helper: recursively list all CSV paths under the WAL base path
-  list_all_csvs() {
-    local minio_path="local/${WAL_S3_PATH#s3://}"
-    docker compose exec -T minio mc find "${minio_path}" --name '*.csv' 2>/dev/null | sed "s|^local/|s3://|" || true
+  # Helper: list CSV paths under each day directory in the date range
+  list_day_csvs() {
+    local minio_base minio_path
+    minio_base="local/${WAL_S3_PATH#s3://}"
+    for day in $(build_days); do
+      minio_path="${minio_base}/${day}"
+      docker compose exec -T minio mc find "${minio_path}" --name '*.csv' 2>/dev/null | sed "s|^local/|s3://|" || true
+    done
   }
 
   # Helper: read a file from object storage to stdout
@@ -138,16 +197,21 @@ else
     docker compose exec -T minio mc cat "${minio_path}" > "${local_path}" 2>/dev/null
   }
 
-  # Step 1: Collect parquet file S3 paths from commit log CSVs, filtering by checkpoint_id
+  # Step 1: Collect parquet file S3 paths from commit log CSVs
   OUTPUT_FILES=""
   DROPPED_FILES=""
 
-  for csv_s3_path in $(list_all_csvs); do
+  for csv_s3_path in $(list_day_csvs); do
     csv=$(read_file "${csv_s3_path}" || true)
     if [[ -n "${csv}" ]]; then
       csv_name=$(basename "${csv_s3_path}")
-      # Filter rows by checkpoint_id range, extract s3_key (field 2)
-      paths=$(echo "${csv}" | tail -n +2 | awk -F',' -v start="${START_CHK}" -v end="${END_CHK}" '$1 >= start && $1 <= end {print $2}')
+      if [[ "${HAS_TIME}" == true ]]; then
+        # Filter rows by commit_timestamp (field 3) within the time range
+        paths=$(echo "${csv}" | tail -n +2 | awk -F',' -v start="${START_EPOCH_MS}" -v end="${END_EPOCH_MS}" '$3 >= start && $3 <= end {print $2}')
+      else
+        # Date-only: include all rows from matched CSVs
+        paths=$(echo "${csv}" | tail -n +2 | awk -F',' '{print $2}')
+      fi
       if [[ "${csv_name}" == output-* ]]; then
         for p in ${paths}; do
           OUTPUT_FILES="${OUTPUT_FILES} ${p}"
@@ -161,7 +225,7 @@ else
   done
 
   if [[ -z "${OUTPUT_FILES}" && -z "${DROPPED_FILES}" ]]; then
-    echo "ERROR: No files found in commit log for checkpoints ${START_CHK}-${END_CHK}"
+    echo "ERROR: No files found in commit log for ${START_DATE} to ${END_DATE}"
     exit 1
   fi
 
@@ -218,7 +282,7 @@ fi
 # ---------------------------------------------------------------------------
 # Display results (shared by both paths — queries the persistent DuckDB file)
 # ---------------------------------------------------------------------------
-echo "=== Offset Analysis (checkpoints ${START_CHK}-${END_CHK}) ==="
+echo "=== Offset Analysis (${START_DATE} to ${END_DATE}) ==="
 echo ""
 duckdb "${DB_FILE}" -c "SELECT * FROM summary ORDER BY kafka_partition;"
 

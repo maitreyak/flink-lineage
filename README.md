@@ -177,19 +177,21 @@ grep -r '^5,' /tmp/write-ahead-commit-log/
 
 ### Offset Gap Verification
 
-Use `scripts/check-offset-gaps.sh` to verify there are no missing Kafka offsets across a range of checkpoints. The script reads the write-ahead commit log, downloads the referenced parquet files (both output and dropped), and uses DuckDB to check for gaps.
+Use `scripts/check-offset-gaps.sh` to verify there are no missing Kafka offsets across a date range. The script reads the write-ahead commit log CSVs for the specified day(s), downloads the referenced parquet files (both output and dropped), and uses DuckDB to check for gaps.
 
 ```bash
-# Usage: ./scripts/check-offset-gaps.sh <docker|aws> <start_checkpoint> <end_checkpoint>
+# Usage: ./scripts/check-offset-gaps.sh <docker|aws> <start_date> <end_date>
+#   Date formats: 'MM-DD-YYYY' (full day) or 'MM-DD-YYYY HH:MM' (minute-level)
 
-# Docker Compose
-./scripts/check-offset-gaps.sh docker 1 4
+# Full day (all commit log entries for that day)
+./scripts/check-offset-gaps.sh aws '03-03-2026' '03-03-2026'
+./scripts/check-offset-gaps.sh docker '03-03-2026' '03-03-2026'
 
-# AWS
-./scripts/check-offset-gaps.sh aws 1 4
+# Minute-level range (filters by commit_timestamp)
+./scripts/check-offset-gaps.sh aws '03-03-2026 21:37' '03-03-2026 21:39'
 
 # Override WAL path
-WAL_S3_PATH=s3://my-bucket/wal ./scripts/check-offset-gaps.sh aws 1 4
+WAL_S3_PATH=s3://my-bucket/wal ./scripts/check-offset-gaps.sh aws '03-03-2026' '03-03-2026'
 ```
 
 Requires [DuckDB](https://duckdb.org/) (`brew install duckdb`).
