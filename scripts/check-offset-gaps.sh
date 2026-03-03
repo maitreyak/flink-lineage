@@ -64,6 +64,15 @@ if [[ "${ENV_TYPE}" == "aws" ]]; then
   # ---------------------------------------------------------------------------
   # AWS: DuckDB reads commit log CSVs and parquet files directly from S3
   # ---------------------------------------------------------------------------
+  # Build per-checkpoint glob list to avoid scanning all chk-* directories on S3
+  CSV_GLOBS=""
+  for chk in $(seq "${START_CHK}" "${END_CHK}"); do
+    if [[ -n "${CSV_GLOBS}" ]]; then
+      CSV_GLOBS="${CSV_GLOBS}, "
+    fi
+    CSV_GLOBS="${CSV_GLOBS}'${WAL_S3_PATH}/chk-${chk}/*-subtask-*.csv'"
+  done
+
   duckdb "${DB_FILE}" <<EOSQL
 .output /dev/null
 INSTALL httpfs;
@@ -74,8 +83,7 @@ CREATE TABLE commit_log AS
 SELECT
     s3_key,
     CASE WHEN filename LIKE '%/output-%' THEN 'output' ELSE 'dropped' END AS source
-FROM read_csv_auto('${WAL_S3_PATH}/chk-*/*-subtask-*.csv', filename=true)
-WHERE checkpoint_id BETWEEN ${START_CHK} AND ${END_CHK};
+FROM read_csv_auto([${CSV_GLOBS}], filename=true);
 
 SET VARIABLE parquet_files = (SELECT list(DISTINCT s3_key) FROM commit_log);
 
