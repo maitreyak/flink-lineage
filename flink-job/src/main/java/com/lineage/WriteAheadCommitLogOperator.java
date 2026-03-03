@@ -15,6 +15,9 @@ import org.slf4j.LoggerFactory;
 
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.ZonedDateTime;
 import java.util.UUID;
 
 /**
@@ -84,8 +87,13 @@ public class WriteAheadCommitLogOperator
     }
 
     private void writeCsv(long checkpointId, String s3Key, long commitTimestamp) throws Exception {
-        String filePath = String.format("%s/chk-%d/%s-subtask-%d-%s.csv",
-                commitLogBasePath, checkpointId, filePrefix, subtaskIndex,
+        Instant instant = Instant.ofEpochMilli(commitTimestamp);
+        ZonedDateTime zdt = instant.atZone(ZoneOffset.UTC);
+        String datePart = String.format("%02d-%02d-%d/%02d/%02d",
+                zdt.getMonthValue(), zdt.getDayOfMonth(), zdt.getYear(),
+                zdt.getHour(), zdt.getMinute());
+        String filePath = String.format("%s/%s/%s-subtask-%d-%s.csv",
+                commitLogBasePath, datePart, filePrefix, subtaskIndex,
                 UUID.randomUUID());
 
         StringBuilder csv = new StringBuilder();

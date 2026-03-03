@@ -64,15 +64,6 @@ if [[ "${ENV_TYPE}" == "aws" ]]; then
   # ---------------------------------------------------------------------------
   # AWS: DuckDB reads commit log CSVs and parquet files directly from S3
   # ---------------------------------------------------------------------------
-  # Build per-checkpoint glob list to avoid scanning all chk-* directories on S3
-  CSV_GLOBS=""
-  for chk in $(seq "${START_CHK}" "${END_CHK}"); do
-    if [[ -n "${CSV_GLOBS}" ]]; then
-      CSV_GLOBS="${CSV_GLOBS}, "
-    fi
-    CSV_GLOBS="${CSV_GLOBS}'${WAL_S3_PATH}/chk-${chk}/*-subtask-*.csv'"
-  done
-
   duckdb "${DB_FILE}" <<EOSQL
 .output /dev/null
 INSTALL httpfs;
@@ -81,9 +72,11 @@ CREATE SECRET (TYPE S3, PROVIDER CREDENTIAL_CHAIN);
 
 CREATE TABLE commit_log AS
 SELECT
+    checkpoint_id,
     s3_key,
     CASE WHEN filename LIKE '%/output-%' THEN 'output' ELSE 'dropped' END AS source
-FROM read_csv_auto([${CSV_GLOBS}], filename=true);
+FROM read_csv_auto('${WAL_S3_PATH}/**/*.csv', filename=true)
+WHERE checkpoint_id BETWEEN ${START_CHK} AND ${END_CHK};
 
 SET VARIABLE parquet_files = (SELECT list(DISTINCT s3_key) FROM commit_log);
 
@@ -124,11 +117,10 @@ else
   # Docker Compose: download files via docker, then load into DuckDB
   # ---------------------------------------------------------------------------
 
-  # Helper: list CSV filenames in a checkpoint directory
-  list_csvs() {
-    local s3_dir="$1"
-    local minio_path="local/${s3_dir#s3://}"
-    docker compose exec -T minio mc ls "${minio_path}" 2>/dev/null | awk '{print $NF}' | grep '\.csv$' || true
+  # Helper: recursively list all CSV paths under the WAL base path
+  list_all_csvs() {
+    local minio_path="local/${WAL_S3_PATH#s3://}"
+    docker compose exec -T minio mc find "${minio_path}" --name '*.csv' 2>/dev/null | sed "s|^local/|s3://|" || true
   }
 
   # Helper: read a file from object storage to stdout
@@ -146,27 +138,26 @@ else
     docker compose exec -T minio mc cat "${minio_path}" > "${local_path}" 2>/dev/null
   }
 
-  # Step 1: Collect all parquet file S3 paths from commit log CSVs
+  # Step 1: Collect parquet file S3 paths from commit log CSVs, filtering by checkpoint_id
   OUTPUT_FILES=""
   DROPPED_FILES=""
 
-  for chk in $(seq "${START_CHK}" "${END_CHK}"); do
-    chk_dir="${WAL_S3_PATH}/chk-${chk}/"
-    for csv_name in $(list_csvs "${chk_dir}"); do
-      csv=$(read_file "${WAL_S3_PATH}/chk-${chk}/${csv_name}" || true)
-      if [[ -n "${csv}" ]]; then
-        paths=$(echo "${csv}" | tail -n +2 | cut -d',' -f2)
-        if [[ "${csv_name}" == output-* ]]; then
-          for p in ${paths}; do
-            OUTPUT_FILES="${OUTPUT_FILES} ${p}"
-          done
-        elif [[ "${csv_name}" == dropped-* ]]; then
-          for p in ${paths}; do
-            DROPPED_FILES="${DROPPED_FILES} ${p}"
-          done
-        fi
+  for csv_s3_path in $(list_all_csvs); do
+    csv=$(read_file "${csv_s3_path}" || true)
+    if [[ -n "${csv}" ]]; then
+      csv_name=$(basename "${csv_s3_path}")
+      # Filter rows by checkpoint_id range, extract s3_key (field 2)
+      paths=$(echo "${csv}" | tail -n +2 | awk -F',' -v start="${START_CHK}" -v end="${END_CHK}" '$1 >= start && $1 <= end {print $2}')
+      if [[ "${csv_name}" == output-* ]]; then
+        for p in ${paths}; do
+          OUTPUT_FILES="${OUTPUT_FILES} ${p}"
+        done
+      elif [[ "${csv_name}" == dropped-* ]]; then
+        for p in ${paths}; do
+          DROPPED_FILES="${DROPPED_FILES} ${p}"
+        done
       fi
-    done
+    fi
   done
 
   if [[ -z "${OUTPUT_FILES}" && -z "${DROPPED_FILES}" ]]; then

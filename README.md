@@ -110,7 +110,7 @@ WriteAheadCommitLogFileSink (wraps FileSink)
     |
     v
 FileSink --> s3://flink-data/output/                    (enriched data, partitioned by date/hour)
-         +-> s3://flink-data/write-ahead-commit-log/    (write-ahead commit log CSV, partitioned by checkpoint)
+         +-> s3://flink-data/write-ahead-commit-log/    (write-ahead commit log CSV, partitioned by date/hour/minute)
 ```
 
 ### Data Flow
@@ -151,12 +151,12 @@ Schema: `uuid` (string), `timestamp` (long), `kafka_topic` (string), `kafka_part
 
 ### Write-Ahead Commit Log Files
 
-Written to `s3://flink-data/write-ahead-commit-log/` per checkpoint as CSV files:
+Written to `s3://flink-data/write-ahead-commit-log/` with date/hour/minute partitioning (UTC) as CSV files:
 
 ```
-write-ahead-commit-log/chk-1/subtask-0.csv
-write-ahead-commit-log/chk-1/subtask-1.csv
-write-ahead-commit-log/chk-2/subtask-0.csv
+write-ahead-commit-log/03-03-2026/00/01/output-subtask-0-<uuid>.csv
+write-ahead-commit-log/03-03-2026/00/01/output-subtask-1-<uuid>.csv
+write-ahead-commit-log/03-03-2026/00/02/output-subtask-0-<uuid>.csv
 ...
 ```
 
@@ -171,8 +171,8 @@ To query which files belong to a specific checkpoint:
 docker compose exec minio mc cp --recursive local/flink-data/write-ahead-commit-log/ /tmp/wal/
 docker compose cp minio:/tmp/wal /tmp/write-ahead-commit-log
 
-# List files committed by checkpoint 5
-cat /tmp/write-ahead-commit-log/chk-5/subtask-*.csv
+# List files committed by checkpoint 5 (search all date partitions, filter by checkpoint_id)
+grep -r '^5,' /tmp/write-ahead-commit-log/
 ```
 
 ### Offset Gap Verification
