@@ -75,7 +75,7 @@ public class LineageJob {
 
         // Deserialize Avro + enrich with Kafka metadata
         SingleOutputStreamOperator<GenericRecord> enrichedStream = kafkaStream
-                .process(new EnrichFunction())
+                .process(new EnrichFunction(WRITE_AHEAD_COMMIT_LOG_PATH))
                 .returns(new GenericRecordAvroTypeInfo(AvroSchema.ENRICHED_EVENT_SCHEMA));
 
         // File sink: Parquet with date-time bucket assigner

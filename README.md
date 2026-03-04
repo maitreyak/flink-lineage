@@ -177,7 +177,7 @@ grep -r '^5,' /tmp/write-ahead-commit-log/
 
 ### Offset Gap Verification
 
-Use `scripts/check-offset-gaps.sh` to verify there are no missing Kafka offsets across a date range. The script reads the write-ahead commit log CSVs for the specified day(s), downloads the referenced parquet files (both output and dropped), and uses DuckDB to check for gaps.
+Use `scripts/check-offset-gaps.sh` to verify there are no missing Kafka offsets across a date range. The script reads offset-range metadata CSVs from the write-ahead commit log (written by `EnrichFunction` at each checkpoint with per-partition min/max offsets and record counts) and uses DuckDB to check for gaps — no parquet file reads required.
 
 ```bash
 # Usage: ./scripts/check-offset-gaps.sh <docker|aws> <start_date> <end_date>

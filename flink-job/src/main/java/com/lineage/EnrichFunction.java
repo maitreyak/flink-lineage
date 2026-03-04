@@ -6,6 +6,8 @@ import org.apache.avro.generic.GenericDatumReader;
 import org.apache.avro.io.BinaryDecoder;
 import org.apache.avro.io.DecoderFactory;
 
+import org.apache.flink.core.fs.FileSystem;
+import org.apache.flink.core.fs.Path;
 import org.apache.flink.formats.avro.typeutils.GenericRecordAvroTypeInfo;
 import org.apache.flink.runtime.state.FunctionInitializationContext;
 import org.apache.flink.runtime.state.FunctionSnapshotContext;
@@ -20,6 +22,14 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.ZonedDateTime;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.UUID;
 
 /**
  * Deserializes Avro messages from Kafka and enriches them with
@@ -35,14 +45,28 @@ public class EnrichFunction
     public static final OutputTag<GenericRecord> DROPPED_TAG =
             new OutputTag<>("dropped", new GenericRecordAvroTypeInfo(AvroSchema.ENRICHED_EVENT_SCHEMA));
 
+    private final String writeAheadCommitLogPath;
+
     private transient GenericDatumReader<GenericRecord> reader;
     private transient DecoderFactory decoderFactory;
     private transient long currentCheckpointId;
+    private transient int subtaskIndex;
+    private transient HashMap<Integer, Long> partitionMinOffset;
+    private transient HashMap<Integer, Long> partitionMaxOffset;
+    private transient HashMap<Integer, Long> partitionRecordCount;
+
+    public EnrichFunction(String writeAheadCommitLogPath) {
+        this.writeAheadCommitLogPath = writeAheadCommitLogPath;
+    }
 
     @Override
     public void open(org.apache.flink.configuration.Configuration parameters) {
         reader = new GenericDatumReader<>(AvroSchema.INPUT_EVENT_SCHEMA);
         decoderFactory = DecoderFactory.get();
+        subtaskIndex = getRuntimeContext().getTaskInfo().getIndexOfThisSubtask();
+        partitionMinOffset = new HashMap<>();
+        partitionMaxOffset = new HashMap<>();
+        partitionRecordCount = new HashMap<>();
     }
 
     @Override
@@ -50,6 +74,13 @@ public class EnrichFunction
             ConsumerRecord<byte[], byte[]> record,
             Context ctx,
             Collector<GenericRecord> out) {
+        // Track offset ranges before output/dropped split
+        int partition = record.partition();
+        long offset = record.offset();
+        partitionMinOffset.merge(partition, offset, Math::min);
+        partitionMaxOffset.merge(partition, offset, Math::max);
+        partitionRecordCount.merge(partition, 1L, Long::sum);
+
         try {
             byte[] value = record.value();
             BinaryDecoder decoder = decoderFactory.binaryDecoder(value, null);
@@ -82,10 +113,52 @@ public class EnrichFunction
     @Override
     public void snapshotState(FunctionSnapshotContext context) throws Exception {
         currentCheckpointId = context.getCheckpointId();
+
+        if (!partitionMinOffset.isEmpty()) {
+            writeOffsetRangesCsv(currentCheckpointId);
+            partitionMinOffset.clear();
+            partitionMaxOffset.clear();
+            partitionRecordCount.clear();
+        }
+    }
+
+    private void writeOffsetRangesCsv(long checkpointId) throws Exception {
+        Instant instant = Instant.now();
+        ZonedDateTime zdt = instant.atZone(ZoneOffset.UTC);
+        String datePart = String.format("%02d-%02d-%d/%02d/%02d",
+                zdt.getMonthValue(), zdt.getDayOfMonth(), zdt.getYear(),
+                zdt.getHour(), zdt.getMinute());
+        String filePath = String.format("%s/%s/offsets-subtask-%d-%s.csv",
+                writeAheadCommitLogPath, datePart, subtaskIndex,
+                UUID.randomUUID());
+
+        StringBuilder csv = new StringBuilder();
+        csv.append("checkpoint_id,kafka_partition,min_offset,max_offset,record_count\n");
+        for (Map.Entry<Integer, Long> entry : partitionMinOffset.entrySet()) {
+            int partition = entry.getKey();
+            csv.append(checkpointId)
+               .append(',')
+               .append(partition)
+               .append(',')
+               .append(entry.getValue())
+               .append(',')
+               .append(partitionMaxOffset.get(partition))
+               .append(',')
+               .append(partitionRecordCount.get(partition))
+               .append('\n');
+        }
+
+        Path fsPath = new Path(filePath);
+        FileSystem fs = fsPath.getFileSystem();
+        try (OutputStream out = fs.create(fsPath, FileSystem.WriteMode.OVERWRITE)) {
+            out.write(csv.toString().getBytes(StandardCharsets.UTF_8));
+        }
+        LOG.info("Wrote offset ranges: checkpoint={} partitions={} path={}",
+                checkpointId, partitionMinOffset.size(), filePath);
     }
 
     @Override
     public void initializeState(FunctionInitializationContext context) throws Exception {
-        // No state to restore — checkpoint_id is transient
+        // No state to restore — checkpoint_id is transient, offset maps are rebuilt from replayed records
     }
 }
