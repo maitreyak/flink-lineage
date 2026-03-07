@@ -262,10 +262,11 @@ EOSQL
       exit 1
     fi
 
-    # Step 3: Read parquet from S3 in batches of 500
+    # Step 3: Read parquet from S3 in batches
+    PARQUET_BATCH_SIZE="${PARQUET_BATCH_SIZE:-2000}"
     PARQUET_PATHS=$(duckdb "${DB_FILE}" -csv -noheader -c "SELECT DISTINCT s3_key FROM commit_log;")
     PARQUET_COUNT=$(echo "${PARQUET_PATHS}" | grep -c . || true)
-    echo "Reading ${PARQUET_COUNT} parquet files from S3..."
+    echo "Reading ${PARQUET_COUNT} parquet files from S3 (batch size: ${PARQUET_BATCH_SIZE})..."
 
     SQL_FILE="${WORK_DIR}/parquet_batch.sql"
     {
@@ -284,7 +285,7 @@ EOSQL
           batch_list="'${path}'"
         fi
         count=$((count + 1))
-        if [[ $count -ge 500 ]]; then
+        if [[ $count -ge $PARQUET_BATCH_SIZE ]]; then
           echo "INSERT INTO all_records SELECT kafka_partition, kafka_offset FROM read_parquet([${batch_list}]);"
           batch_list=""
           count=0
