@@ -18,8 +18,10 @@ set -euo pipefail
 # DuckDB to verify there are no missing offsets per Kafka partition when
 # output + dropped records are combined.
 #
-# AWS mode uses DuckDB's native S3 support (httpfs) to read files directly,
-# avoiding slow sequential downloads. Docker Compose mode downloads via docker.
+# AWS mode downloads CSVs locally via `aws s3 sync` (fast parallel download),
+# parses them with DuckDB, then reads parquet files from S3 in batches.
+# Single-minute paths use a fast one-shot S3 query.
+# Docker Compose mode downloads via docker.
 #
 # Override WAL path with: WAL_S3_PATH=s3://my-bucket/wal ./check-offset-gaps.sh aws '03-03-2026' '03-03-2026'
 
@@ -44,6 +46,11 @@ fi
 
 if ! command -v duckdb &>/dev/null; then
   echo "ERROR: duckdb is not installed. Install it with: brew install duckdb"
+  exit 1
+fi
+
+if [[ "${ENV_TYPE}" == "aws" ]] && ! command -v aws &>/dev/null; then
+  echo "ERROR: aws CLI is not installed. Install it from: https://aws.amazon.com/cli/"
   exit 1
 fi
 
@@ -136,9 +143,9 @@ DB_FILE="${WORK_DIR}/analysis.duckdb"
 
 if [[ "${ENV_TYPE}" == "aws" ]]; then
   # ---------------------------------------------------------------------------
-  # AWS: DuckDB reads commit log CSVs and parquet files directly from S3.
-  # Paths are expanded to minute-level globs (~16 files each) and processed in
-  # a single DuckDB session to avoid S3 connection exhaustion.
+  # AWS: Download commit log CSVs locally via aws s3 sync, then parse with
+  # DuckDB. Parquet files are read directly from S3 in batches.
+  # Single-minute paths use a fast one-shot S3 query (no download needed).
   # ---------------------------------------------------------------------------
 
   # Add WHERE clause for time filtering when HH:MM is specified (date-range mode only)
@@ -147,40 +154,23 @@ if [[ "${ENV_TYPE}" == "aws" ]]; then
     TIME_FILTER="WHERE commit_timestamp BETWEEN ${START_EPOCH_MS} AND ${END_EPOCH_MS}"
   fi
 
-  # Build CSV globs, expanding to minute-level for manageable batch sizes.
-  # WAL structure: {date}/{HH}/{mm}/*.csv
-  CSV_GLOBS=()
-  if [[ "${PATHS_MODE}" == true ]]; then
-    for p in "${PATHS[@]}"; do
-      p="${p%/}"
-      slashes="${p//[^\/]/}"
-      case ${#slashes} in
-        0)  for hour in $(printf '%02d\n' {0..23}); do
-              for min in $(printf '%02d\n' {0..59}); do
-                CSV_GLOBS+=("${WAL_S3_PATH}/${p}/${hour}/${min}/*.csv")
-              done
-            done ;;
-        1)  for min in $(printf '%02d\n' {0..59}); do
-              CSV_GLOBS+=("${WAL_S3_PATH}/${p}/${min}/*.csv")
-            done ;;
-        *)  CSV_GLOBS+=("${WAL_S3_PATH}/${p}/*.csv") ;;
-      esac
-    done
-  else
-    for day in $(build_days); do
-      for hour in $(printf '%02d\n' {0..23}); do
-        for min in $(printf '%02d\n' {0..59}); do
-          CSV_GLOBS+=("${WAL_S3_PATH}/${day}/${hour}/${min}/*.csv")
-        done
-      done
-    done
+  # Detect single-minute path for fast one-shot query
+  IS_SINGLE_MINUTE=false
+  SINGLE_MINUTE_GLOB=""
+  if [[ "${PATHS_MODE}" == true && ${#PATHS[@]} -eq 1 ]]; then
+    p="${PATHS[0]%/}"
+    slashes="${p//[^\/]/}"
+    if [[ ${#slashes} -ge 2 ]]; then
+      IS_SINGLE_MINUTE=true
+      SINGLE_MINUTE_GLOB="${WAL_S3_PATH}/${p}/*.csv"
+    fi
   fi
 
   # Install httpfs once
   duckdb "${DB_FILE}" -c "INSTALL httpfs;" 2>/dev/null
 
-  if [[ ${#CSV_GLOBS[@]} -eq 1 ]]; then
-    # Single glob (minute path) — one-shot query
+  if [[ "${IS_SINGLE_MINUTE}" == true ]]; then
+    # --- Fast path: single minute, one-shot S3 query ---
     duckdb "${DB_FILE}" <<EOSQL
 .output /dev/null
 LOAD httpfs;
@@ -192,7 +182,7 @@ SELECT
     checkpoint_id,
     s3_key,
     CASE WHEN filename LIKE '%/output-%' THEN 'output' ELSE 'dropped' END AS source
-FROM read_csv_auto(['${CSV_GLOBS[0]}'], filename=true)
+FROM read_csv_auto(['${SINGLE_MINUTE_GLOB}'], filename=true)
 ${TIME_FILTER};
 
 SET VARIABLE parquet_files = (SELECT list(DISTINCT s3_key) FROM commit_log);
@@ -218,34 +208,49 @@ SELECT *,
 FROM per_partition;
 EOSQL
   else
-    # Multiple globs — generate a single SQL script with minute-level batches.
-    # .bail off lets DuckDB skip empty minutes without aborting the session.
-    SQL_FILE="${WORK_DIR}/query.sql"
-    {
-      echo ".output /dev/null"
-      echo "LOAD httpfs;"
-      echo "SET http_retries = 3;"
-      echo "CREATE SECRET (TYPE S3, PROVIDER CREDENTIAL_CHAIN);"
-      echo "CREATE TABLE commit_log (checkpoint_id BIGINT, s3_key VARCHAR, source VARCHAR);"
-      echo "CREATE TABLE all_records (kafka_partition INTEGER, kafka_offset BIGINT);"
-      echo ".bail off"
+    # --- Multi-path: download CSVs locally, then batch parquet reads from S3 ---
 
-      for glob in "${CSV_GLOBS[@]}"; do
-        cat <<EOSQL
-SET VARIABLE _files = (SELECT []::VARCHAR[]);
-DROP TABLE IF EXISTS _batch;
-CREATE TEMP TABLE _batch AS SELECT checkpoint_id, s3_key, CASE WHEN filename LIKE '%/output-%' THEN 'output' ELSE 'dropped' END AS source FROM read_csv_auto(['${glob}'], filename=true) ${TIME_FILTER};
-INSERT INTO commit_log SELECT * FROM _batch;
-SET VARIABLE _files = (SELECT list(DISTINCT s3_key) FROM _batch);
-INSERT INTO all_records SELECT kafka_partition, kafka_offset FROM read_parquet(getvariable('_files'));
-EOSQL
+    # Step 1: Download CSVs via aws s3 sync
+    LOCAL_CSV="${WORK_DIR}/csv"
+    if [[ "${PATHS_MODE}" == true ]]; then
+      for p in "${PATHS[@]}"; do
+        p="${p%/}"
+        echo "Downloading CSVs from ${p}..."
+        mkdir -p "${LOCAL_CSV}/${p}"
+        aws s3 sync "${WAL_S3_PATH}/${p}/" "${LOCAL_CSV}/${p}/" --quiet
       done
+    else
+      for day in $(build_days); do
+        echo "Downloading CSVs from ${day}..."
+        mkdir -p "${LOCAL_CSV}/${day}"
+        aws s3 sync "${WAL_S3_PATH}/${day}/" "${LOCAL_CSV}/${day}/" --quiet
+      done
+    fi
 
-      echo ".bail on"
-    } > "${SQL_FILE}"
+    CSV_COUNT=$(find "${LOCAL_CSV}" -name '*.csv' | wc -l | tr -d ' ')
+    echo "Downloaded ${CSV_COUNT} CSV files"
 
-    echo "Processing ${#CSV_GLOBS[@]} minute batches..."
-    duckdb "${DB_FILE}" < "${SQL_FILE}" 2>/dev/null || true
+    if [[ "${CSV_COUNT}" -eq 0 ]]; then
+      if [[ "${PATHS_MODE}" == true ]]; then
+        echo "ERROR: No CSV files found for paths: ${PATHS[*]}"
+      else
+        echo "ERROR: No CSV files found for ${START_DATE} to ${END_DATE}"
+      fi
+      exit 1
+    fi
+
+    # Step 2: Parse CSVs locally with DuckDB (instant — no S3 overhead)
+    duckdb "${DB_FILE}" <<EOSQL
+CREATE TABLE commit_log AS
+SELECT
+    checkpoint_id,
+    s3_key,
+    CASE WHEN filename LIKE '%/output-%' THEN 'output' ELSE 'dropped' END AS source
+FROM read_csv_auto('${LOCAL_CSV}/**/*.csv', filename=true)
+${TIME_FILTER};
+
+CREATE TABLE all_records (kafka_partition INTEGER, kafka_offset BIGINT);
+EOSQL
 
     ROW_COUNT=$(duckdb "${DB_FILE}" -csv -noheader -c "SELECT count(*) FROM commit_log;")
     if [[ "${ROW_COUNT}" -eq 0 ]]; then
@@ -257,6 +262,45 @@ EOSQL
       exit 1
     fi
 
+    # Step 3: Read parquet from S3 in batches of 500
+    PARQUET_PATHS=$(duckdb "${DB_FILE}" -csv -noheader -c "SELECT DISTINCT s3_key FROM commit_log;")
+    PARQUET_COUNT=$(echo "${PARQUET_PATHS}" | grep -c . || true)
+    echo "Reading ${PARQUET_COUNT} parquet files from S3..."
+
+    SQL_FILE="${WORK_DIR}/parquet_batch.sql"
+    {
+      echo "LOAD httpfs;"
+      echo "SET http_retries = 3;"
+      echo "CREATE SECRET (TYPE S3, PROVIDER CREDENTIAL_CHAIN);"
+      echo ".bail off"
+
+      batch_list=""
+      count=0
+      while IFS= read -r path; do
+        [[ -z "$path" ]] && continue
+        if [[ -n "$batch_list" ]]; then
+          batch_list="${batch_list}, '${path}'"
+        else
+          batch_list="'${path}'"
+        fi
+        count=$((count + 1))
+        if [[ $count -ge 500 ]]; then
+          echo "INSERT INTO all_records SELECT kafka_partition, kafka_offset FROM read_parquet([${batch_list}]);"
+          batch_list=""
+          count=0
+        fi
+      done <<< "${PARQUET_PATHS}"
+
+      if [[ $count -gt 0 ]]; then
+        echo "INSERT INTO all_records SELECT kafka_partition, kafka_offset FROM read_parquet([${batch_list}]);"
+      fi
+
+      echo ".bail on"
+    } > "${SQL_FILE}"
+
+    duckdb "${DB_FILE}" < "${SQL_FILE}" 2>/dev/null || true
+
+    # Step 4: Create summary
     duckdb "${DB_FILE}" <<EOSQL
 CREATE TABLE summary AS
 WITH per_partition AS (
