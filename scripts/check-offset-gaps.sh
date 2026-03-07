@@ -136,22 +136,9 @@ DB_FILE="${WORK_DIR}/analysis.duckdb"
 
 if [[ "${ENV_TYPE}" == "aws" ]]; then
   # ---------------------------------------------------------------------------
-  # AWS: DuckDB reads commit log CSVs and parquet files directly from S3
+  # AWS: DuckDB reads commit log CSVs and parquet files directly from S3.
+  # Day-level paths are split into hour batches to avoid S3 connection limits.
   # ---------------------------------------------------------------------------
-
-  # Build DuckDB glob list for CSV discovery
-  GLOB_LIST=""
-  if [[ "${PATHS_MODE}" == true ]]; then
-    for p in "${PATHS[@]}"; do
-      if [[ -n "${GLOB_LIST}" ]]; then GLOB_LIST+=", "; fi
-      GLOB_LIST+="'${WAL_S3_PATH}/${p}/**/*.csv'"
-    done
-  else
-    for day in $(build_days); do
-      if [[ -n "${GLOB_LIST}" ]]; then GLOB_LIST+=", "; fi
-      GLOB_LIST+="'${WAL_S3_PATH}/${day}/**/*.csv'"
-    done
-  fi
 
   # Add WHERE clause for time filtering when HH:MM is specified (date-range mode only)
   TIME_FILTER=""
@@ -159,10 +146,37 @@ if [[ "${ENV_TYPE}" == "aws" ]]; then
     TIME_FILTER="WHERE commit_timestamp BETWEEN ${START_EPOCH_MS} AND ${END_EPOCH_MS}"
   fi
 
-  duckdb "${DB_FILE}" <<EOSQL
+  # Build CSV globs, expanding day-level paths into per-hour batches.
+  CSV_GLOBS=()
+  if [[ "${PATHS_MODE}" == true ]]; then
+    for p in "${PATHS[@]}"; do
+      p="${p%/}"
+      slashes="${p//[^\/]/}"
+      case ${#slashes} in
+        0)  for hour in $(printf '%02d\n' {0..23}); do
+              CSV_GLOBS+=("${WAL_S3_PATH}/${p}/${hour}/*/*.csv")
+            done ;;
+        1)  CSV_GLOBS+=("${WAL_S3_PATH}/${p}/*/*.csv") ;;
+        *)  CSV_GLOBS+=("${WAL_S3_PATH}/${p}/*.csv") ;;
+      esac
+    done
+  else
+    for day in $(build_days); do
+      for hour in $(printf '%02d\n' {0..23}); do
+        CSV_GLOBS+=("${WAL_S3_PATH}/${day}/${hour}/*/*.csv")
+      done
+    done
+  fi
+
+  # Install httpfs once
+  duckdb "${DB_FILE}" -c "INSTALL httpfs;" 2>/dev/null
+
+  if [[ ${#CSV_GLOBS[@]} -eq 1 ]]; then
+    # Single glob (hour or minute path) — one-shot query
+    duckdb "${DB_FILE}" <<EOSQL
 .output /dev/null
-INSTALL httpfs;
 LOAD httpfs;
+SET http_retries = 3;
 CREATE SECRET (TYPE S3, PROVIDER CREDENTIAL_CHAIN);
 
 CREATE TABLE commit_log AS
@@ -170,7 +184,7 @@ SELECT
     checkpoint_id,
     s3_key,
     CASE WHEN filename LIKE '%/output-%' THEN 'output' ELSE 'dropped' END AS source
-FROM read_csv_auto([${GLOB_LIST}], filename=true)
+FROM read_csv_auto(['${CSV_GLOBS[0]}'], filename=true)
 ${TIME_FILTER};
 
 SET VARIABLE parquet_files = (SELECT list(DISTINCT s3_key) FROM commit_log);
@@ -195,6 +209,76 @@ SELECT *,
        record_count - distinct_offsets AS duplicate_offsets
 FROM per_partition;
 EOSQL
+  else
+    # Multiple globs (day-level) — process hour by hour to stay within S3
+    # connection limits. Each batch reads its CSVs and parquet files together.
+    duckdb "${DB_FILE}" <<EOSQL
+.output /dev/null
+LOAD httpfs;
+CREATE TABLE commit_log (checkpoint_id BIGINT, s3_key VARCHAR, source VARCHAR);
+CREATE TABLE all_records (kafka_partition INTEGER, kafka_offset BIGINT);
+EOSQL
+
+    BATCH_NUM=0
+    TOTAL_BATCHES=${#CSV_GLOBS[@]}
+    for glob in "${CSV_GLOBS[@]}"; do
+      BATCH_NUM=$((BATCH_NUM + 1))
+      label=$(echo "${glob}" | grep -oE '[0-9]{2}-[0-9]{2}-[0-9]{4}/[0-9]{2}')
+      echo -ne "\rProcessing batch ${BATCH_NUM}/${TOTAL_BATCHES} (${label})..."
+
+      duckdb "${DB_FILE}" <<EOSQL 2>/dev/null || true
+.output /dev/null
+LOAD httpfs;
+SET http_retries = 3;
+CREATE SECRET (TYPE S3, PROVIDER CREDENTIAL_CHAIN);
+
+CREATE TEMPORARY TABLE batch_csv AS
+SELECT
+    checkpoint_id,
+    s3_key,
+    CASE WHEN filename LIKE '%/output-%' THEN 'output' ELSE 'dropped' END AS source
+FROM read_csv_auto(['${glob}'], filename=true)
+${TIME_FILTER};
+
+INSERT INTO commit_log SELECT * FROM batch_csv;
+
+SET VARIABLE batch_files = (SELECT list(DISTINCT s3_key) FROM batch_csv);
+
+INSERT INTO all_records
+SELECT kafka_partition, kafka_offset
+FROM read_parquet(getvariable('batch_files'));
+EOSQL
+    done
+    echo ""
+
+    ROW_COUNT=$(duckdb "${DB_FILE}" -csv -noheader -c "SELECT count(*) FROM commit_log;")
+    if [[ "${ROW_COUNT}" -eq 0 ]]; then
+      if [[ "${PATHS_MODE}" == true ]]; then
+        echo "ERROR: No files found in commit log for paths: ${PATHS[*]}"
+      else
+        echo "ERROR: No files found in commit log for ${START_DATE} to ${END_DATE}"
+      fi
+      exit 1
+    fi
+
+    duckdb "${DB_FILE}" <<EOSQL
+CREATE TABLE summary AS
+WITH per_partition AS (
+    SELECT kafka_partition,
+           MIN(kafka_offset) AS min_offset,
+           MAX(kafka_offset) AS max_offset,
+           COUNT(*) AS record_count,
+           COUNT(DISTINCT kafka_offset) AS distinct_offsets,
+           MAX(kafka_offset) - MIN(kafka_offset) + 1 AS expected_count
+    FROM all_records
+    GROUP BY kafka_partition
+)
+SELECT *,
+       expected_count - distinct_offsets AS missing_offsets,
+       record_count - distinct_offsets AS duplicate_offsets
+FROM per_partition;
+EOSQL
+  fi
 
   # Print file counts
   COUNTS=$(duckdb "${DB_FILE}" -csv -noheader -c "
