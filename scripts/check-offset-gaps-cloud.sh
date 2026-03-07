@@ -70,9 +70,23 @@ echo "=== Running gap checker in EKS ==="
 kubectl run "${POD_NAME}" \
   --namespace "${NAMESPACE}" \
   --image "${IMAGE}" \
-  --overrides="{\"spec\":{\"serviceAccountName\":\"${SERVICE_ACCOUNT}\"}}" \
-  --restart=Never \
-  -- aws "${ARGS[@]}"
+  --overrides="{
+    \"spec\": {
+      \"serviceAccountName\": \"${SERVICE_ACCOUNT}\",
+      \"containers\": [{
+        \"name\": \"${POD_NAME}\",
+        \"image\": \"${IMAGE}\",
+        \"command\": [\"check-offset-gaps.sh\"],
+        \"args\": [\"aws\", $(printf '"%s",' "${ARGS[@]}" | sed 's/,$//') ],
+        \"env\": [{\"name\": \"PARALLEL_BATCHES\", \"value\": \"4\"}],
+        \"resources\": {
+          \"requests\": {\"cpu\": \"500m\", \"memory\": \"1Gi\"},
+          \"limits\": {\"cpu\": \"1500m\", \"memory\": \"3Gi\"}
+        }
+      }]
+    }
+  }" \
+  --restart=Never
 
 kubectl wait --for=condition=Ready "pod/${POD_NAME}" -n "${NAMESPACE}" --timeout=60s >/dev/null 2>&1 || true
 kubectl logs -f "${POD_NAME}" -n "${NAMESPACE}"

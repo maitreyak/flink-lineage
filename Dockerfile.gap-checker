@@ -21,6 +21,9 @@ RUN apt-get update && \
     apt-get autoremove -y && \
     rm -rf /var/lib/apt/lists/*
 
+# Pre-install httpfs so it's available without a network fetch at runtime
+RUN duckdb -c "INSTALL httpfs;"
+
 COPY scripts/check-offset-gaps.sh /usr/local/bin/check-offset-gaps.sh
 RUN chmod +x /usr/local/bin/check-offset-gaps.sh
 
