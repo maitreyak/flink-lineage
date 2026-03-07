@@ -137,7 +137,8 @@ DB_FILE="${WORK_DIR}/analysis.duckdb"
 if [[ "${ENV_TYPE}" == "aws" ]]; then
   # ---------------------------------------------------------------------------
   # AWS: DuckDB reads commit log CSVs and parquet files directly from S3.
-  # Day-level paths are split into hour batches to avoid S3 connection limits.
+  # Paths are expanded to minute-level globs (~16 files each) and processed in
+  # a single DuckDB session to avoid S3 connection exhaustion.
   # ---------------------------------------------------------------------------
 
   # Add WHERE clause for time filtering when HH:MM is specified (date-range mode only)
@@ -146,7 +147,8 @@ if [[ "${ENV_TYPE}" == "aws" ]]; then
     TIME_FILTER="WHERE commit_timestamp BETWEEN ${START_EPOCH_MS} AND ${END_EPOCH_MS}"
   fi
 
-  # Build CSV globs, expanding day-level paths into per-hour batches.
+  # Build CSV globs, expanding to minute-level for manageable batch sizes.
+  # WAL structure: {date}/{HH}/{mm}/*.csv
   CSV_GLOBS=()
   if [[ "${PATHS_MODE}" == true ]]; then
     for p in "${PATHS[@]}"; do
@@ -154,16 +156,22 @@ if [[ "${ENV_TYPE}" == "aws" ]]; then
       slashes="${p//[^\/]/}"
       case ${#slashes} in
         0)  for hour in $(printf '%02d\n' {0..23}); do
-              CSV_GLOBS+=("${WAL_S3_PATH}/${p}/${hour}/*/*.csv")
+              for min in $(printf '%02d\n' {0..59}); do
+                CSV_GLOBS+=("${WAL_S3_PATH}/${p}/${hour}/${min}/*.csv")
+              done
             done ;;
-        1)  CSV_GLOBS+=("${WAL_S3_PATH}/${p}/*/*.csv") ;;
+        1)  for min in $(printf '%02d\n' {0..59}); do
+              CSV_GLOBS+=("${WAL_S3_PATH}/${p}/${min}/*.csv")
+            done ;;
         *)  CSV_GLOBS+=("${WAL_S3_PATH}/${p}/*.csv") ;;
       esac
     done
   else
     for day in $(build_days); do
       for hour in $(printf '%02d\n' {0..23}); do
-        CSV_GLOBS+=("${WAL_S3_PATH}/${day}/${hour}/*/*.csv")
+        for min in $(printf '%02d\n' {0..59}); do
+          CSV_GLOBS+=("${WAL_S3_PATH}/${day}/${hour}/${min}/*.csv")
+        done
       done
     done
   fi
@@ -172,7 +180,7 @@ if [[ "${ENV_TYPE}" == "aws" ]]; then
   duckdb "${DB_FILE}" -c "INSTALL httpfs;" 2>/dev/null
 
   if [[ ${#CSV_GLOBS[@]} -eq 1 ]]; then
-    # Single glob (hour or minute path) — one-shot query
+    # Single glob (minute path) — one-shot query
     duckdb "${DB_FILE}" <<EOSQL
 .output /dev/null
 LOAD httpfs;
@@ -210,46 +218,34 @@ SELECT *,
 FROM per_partition;
 EOSQL
   else
-    # Multiple globs (day-level) — process hour by hour to stay within S3
-    # connection limits. Each batch reads its CSVs and parquet files together.
-    duckdb "${DB_FILE}" <<EOSQL
-.output /dev/null
-LOAD httpfs;
-CREATE TABLE commit_log (checkpoint_id BIGINT, s3_key VARCHAR, source VARCHAR);
-CREATE TABLE all_records (kafka_partition INTEGER, kafka_offset BIGINT);
+    # Multiple globs — generate a single SQL script with minute-level batches.
+    # .bail off lets DuckDB skip empty minutes without aborting the session.
+    SQL_FILE="${WORK_DIR}/query.sql"
+    {
+      echo ".output /dev/null"
+      echo "LOAD httpfs;"
+      echo "SET http_retries = 3;"
+      echo "CREATE SECRET (TYPE S3, PROVIDER CREDENTIAL_CHAIN);"
+      echo "CREATE TABLE commit_log (checkpoint_id BIGINT, s3_key VARCHAR, source VARCHAR);"
+      echo "CREATE TABLE all_records (kafka_partition INTEGER, kafka_offset BIGINT);"
+      echo ".bail off"
+
+      for glob in "${CSV_GLOBS[@]}"; do
+        cat <<EOSQL
+SET VARIABLE _files = (SELECT []::VARCHAR[]);
+DROP TABLE IF EXISTS _batch;
+CREATE TEMP TABLE _batch AS SELECT checkpoint_id, s3_key, CASE WHEN filename LIKE '%/output-%' THEN 'output' ELSE 'dropped' END AS source FROM read_csv_auto(['${glob}'], filename=true) ${TIME_FILTER};
+INSERT INTO commit_log SELECT * FROM _batch;
+SET VARIABLE _files = (SELECT list(DISTINCT s3_key) FROM _batch);
+INSERT INTO all_records SELECT kafka_partition, kafka_offset FROM read_parquet(getvariable('_files'));
 EOSQL
+      done
 
-    BATCH_NUM=0
-    TOTAL_BATCHES=${#CSV_GLOBS[@]}
-    for glob in "${CSV_GLOBS[@]}"; do
-      BATCH_NUM=$((BATCH_NUM + 1))
-      label=$(echo "${glob}" | grep -oE '[0-9]{2}-[0-9]{2}-[0-9]{4}/[0-9]{2}')
-      echo -ne "\rProcessing batch ${BATCH_NUM}/${TOTAL_BATCHES} (${label})..."
+      echo ".bail on"
+    } > "${SQL_FILE}"
 
-      duckdb "${DB_FILE}" <<EOSQL 2>/dev/null || true
-.output /dev/null
-LOAD httpfs;
-SET http_retries = 3;
-CREATE SECRET (TYPE S3, PROVIDER CREDENTIAL_CHAIN);
-
-CREATE TEMPORARY TABLE batch_csv AS
-SELECT
-    checkpoint_id,
-    s3_key,
-    CASE WHEN filename LIKE '%/output-%' THEN 'output' ELSE 'dropped' END AS source
-FROM read_csv_auto(['${glob}'], filename=true)
-${TIME_FILTER};
-
-INSERT INTO commit_log SELECT * FROM batch_csv;
-
-SET VARIABLE batch_files = (SELECT list(DISTINCT s3_key) FROM batch_csv);
-
-INSERT INTO all_records
-SELECT kafka_partition, kafka_offset
-FROM read_parquet(getvariable('batch_files'));
-EOSQL
-    done
-    echo ""
+    echo "Processing ${#CSV_GLOBS[@]} minute batches..."
+    duckdb "${DB_FILE}" < "${SQL_FILE}" 2>/dev/null || true
 
     ROW_COUNT=$(duckdb "${DB_FILE}" -csv -noheader -c "SELECT count(*) FROM commit_log;")
     if [[ "${ROW_COUNT}" -eq 0 ]]; then
