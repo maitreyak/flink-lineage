@@ -248,22 +248,26 @@ EOSQL
   else
     # --- Multi-path: download CSVs locally, then batch parquet reads from S3 ---
 
-    # Step 1: Download CSVs via aws s3 sync
+    # Step 1: Download CSVs via aws s3 sync (parallel for multi-path/multi-day)
     LOCAL_CSV="${WORK_DIR}/csv"
+    sync_pids=()
     if [[ "${PATHS_MODE}" == true ]]; then
       for p in "${PATHS[@]}"; do
         p="${p%/}"
         echo "Downloading CSVs from ${p}..."
         mkdir -p "${LOCAL_CSV}/${p}"
-        aws s3 sync "${WAL_S3_PATH}/${p}/" "${LOCAL_CSV}/${p}/" --quiet
+        aws s3 sync "${WAL_S3_PATH}/${p}/" "${LOCAL_CSV}/${p}/" --quiet &
+        sync_pids+=($!)
       done
     else
       for day in $(build_days); do
         echo "Downloading CSVs from ${day}..."
         mkdir -p "${LOCAL_CSV}/${day}"
-        aws s3 sync "${WAL_S3_PATH}/${day}/" "${LOCAL_CSV}/${day}/" --quiet
+        aws s3 sync "${WAL_S3_PATH}/${day}/" "${LOCAL_CSV}/${day}/" --quiet &
+        sync_pids+=($!)
       done
     fi
+    for pid in "${sync_pids[@]}"; do wait "$pid" || true; done
 
     CSV_COUNT=$(find "${LOCAL_CSV}" -name '*.csv' | wc -l | tr -d ' ')
     echo "Downloaded ${CSV_COUNT} CSV files"
@@ -300,44 +304,95 @@ EOSQL
       exit 1
     fi
 
-    # Step 3: Read parquet from S3 in batches
+    # Step 3: Read parquet from S3 in parallel batches
     PARQUET_BATCH_SIZE="${PARQUET_BATCH_SIZE:-2000}"
+    PARALLEL_BATCHES="${PARALLEL_BATCHES:-1}"
+    # Smaller sub-batches per worker to limit concurrent S3 connections
+    # and reduce data loss from transient SSL/network errors
+    WORKER_BATCH_SIZE=$(( PARQUET_BATCH_SIZE / PARALLEL_BATCHES ))
+    [[ $WORKER_BATCH_SIZE -lt 100 ]] && WORKER_BATCH_SIZE=100
     PARQUET_PATHS=$(duckdb "${DB_FILE}" -csv -noheader -c "SELECT DISTINCT s3_key FROM commit_log;")
     PARQUET_COUNT=$(echo "${PARQUET_PATHS}" | grep -c . || true)
-    echo "Reading ${PARQUET_COUNT} parquet files from S3 (batch size: ${PARQUET_BATCH_SIZE})..."
+    echo "Reading ${PARQUET_COUNT} parquet files from S3 (${PARALLEL_BATCHES} parallel workers, sub-batch size: ${WORKER_BATCH_SIZE})..."
 
-    SQL_FILE="${WORK_DIR}/parquet_batch.sql"
-    {
-      echo "LOAD httpfs;"
-      echo "SET http_retries = 3;"
-      echo "CREATE SECRET (TYPE S3, PROVIDER CREDENTIAL_CHAIN);"
-      echo ".bail off"
+    # Split parquet paths into PARALLEL_BATCHES chunk files
+    WORKER_DIR="${WORK_DIR}/workers"
+    mkdir -p "${WORKER_DIR}"
+    worker_idx=0
+    path_num=0
+    while IFS= read -r path; do
+      [[ -z "$path" ]] && continue
+      echo "$path" >> "${WORKER_DIR}/paths_${worker_idx}.txt"
+      path_num=$((path_num + 1))
+      worker_idx=$(( path_num % PARALLEL_BATCHES ))
+    done <<< "${PARQUET_PATHS}"
 
-      batch_list=""
-      count=0
-      while IFS= read -r path; do
-        [[ -z "$path" ]] && continue
-        if [[ -n "$batch_list" ]]; then
-          batch_list="${batch_list}, '${path}'"
-        else
-          batch_list="'${path}'"
-        fi
-        count=$((count + 1))
-        if [[ $count -ge $PARQUET_BATCH_SIZE ]]; then
+    # Launch parallel workers
+    worker_pids=()
+    for paths_file in "${WORKER_DIR}"/paths_*.txt; do
+      [[ -f "$paths_file" ]] || continue
+      wid=$(basename "$paths_file" .txt | sed 's/paths_//')
+      worker_db="${WORKER_DIR}/worker_${wid}.duckdb"
+      worker_sql="${WORKER_DIR}/worker_${wid}.sql"
+      worker_count=$(wc -l < "$paths_file" | tr -d ' ')
+
+      {
+        echo "LOAD httpfs;"
+        echo "SET threads = 2;"
+        echo "SET http_retries = 5;"
+        echo "CREATE SECRET (TYPE S3, PROVIDER CREDENTIAL_CHAIN);"
+        echo "CREATE TABLE all_records (kafka_partition INTEGER, kafka_offset BIGINT);"
+        echo ".bail off"
+
+        batch_list=""
+        count=0
+        while IFS= read -r path; do
+          [[ -z "$path" ]] && continue
+          if [[ -n "$batch_list" ]]; then
+            batch_list="${batch_list}, '${path}'"
+          else
+            batch_list="'${path}'"
+          fi
+          count=$((count + 1))
+          if [[ $count -ge $WORKER_BATCH_SIZE ]]; then
+            echo "INSERT INTO all_records SELECT kafka_partition, kafka_offset FROM read_parquet([${batch_list}]);"
+            batch_list=""
+            count=0
+          fi
+        done < "$paths_file"
+
+        if [[ $count -gt 0 ]]; then
           echo "INSERT INTO all_records SELECT kafka_partition, kafka_offset FROM read_parquet([${batch_list}]);"
-          batch_list=""
-          count=0
         fi
-      done <<< "${PARQUET_PATHS}"
 
-      if [[ $count -gt 0 ]]; then
-        echo "INSERT INTO all_records SELECT kafka_partition, kafka_offset FROM read_parquet([${batch_list}]);"
-      fi
+        echo ".bail on"
+      } > "${worker_sql}"
 
-      echo ".bail on"
-    } > "${SQL_FILE}"
+      echo "  Worker ${wid}: ${worker_count} files"
+      duckdb "${worker_db}" < "${worker_sql}" >/dev/null 2>"${WORKER_DIR}/worker_${wid}.log" &
+      worker_pids+=($!)
+    done
 
-    duckdb "${DB_FILE}" < "${SQL_FILE}" 2>/dev/null || true
+    # Wait for all workers
+    worker_failed=false
+    for pid in "${worker_pids[@]}"; do
+      wait "$pid" || worker_failed=true
+    done
+    if [[ "${worker_failed}" == true ]]; then
+      echo "WARNING: One or more parquet workers had errors (continuing with available data)"
+      for logfile in "${WORKER_DIR}"/worker_*.log; do
+        if [[ -s "$logfile" ]]; then
+          echo "  $(basename "$logfile"):"
+          head -5 "$logfile" | sed 's/^/    /'
+        fi
+      done
+    fi
+
+    # Merge worker results into main DB
+    for worker_db_file in "${WORKER_DIR}"/worker_*.duckdb; do
+      [[ -f "$worker_db_file" ]] || continue
+      duckdb "${DB_FILE}" -c "ATTACH '${worker_db_file}' AS worker; INSERT INTO all_records SELECT * FROM worker.all_records; DETACH worker;" 2>/dev/null || true
+    done
 
     # Step 4: Create summary
     duckdb "${DB_FILE}" <<EOSQL
