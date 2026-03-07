@@ -25,6 +25,30 @@ set -euo pipefail
 #
 # Override WAL path with: WAL_S3_PATH=s3://my-bucket/wal ./check-offset-gaps.sh aws '03-03-2026' '03-03-2026'
 
+# Detect GNU vs BSD date
+GNU_DATE=false
+date --version &>/dev/null 2>&1 && GNU_DATE=true
+
+parse_date() {  # "MM-DD-YYYY [HH:MM]" → output format
+  local input="$1" fmt="$2"
+  if [[ "$GNU_DATE" == true ]]; then
+    local iso=$(echo "$input" | sed 's|\(..\)-\(..\)-\(....\)|\3-\1-\2|')
+    date -d "$iso" +"$fmt"
+  else
+    # BSD: auto-detect format by presence of HH:MM
+    [[ "$input" =~ [0-9]{2}:[0-9]{2}$ ]] \
+      && date -j -f '%m-%d-%Y %H:%M' "$input" +"$fmt" \
+      || date -j -f '%m-%d-%Y' "$input" +"$fmt"
+  fi
+}
+
+epoch_to_date() {  # epoch seconds → output format
+  local epoch="$1" fmt="$2"
+  [[ "$GNU_DATE" == true ]] \
+    && date -d "@$epoch" +"$fmt" \
+    || date -j -r "$epoch" +"$fmt"
+}
+
 ENV_TYPE="${1:-}"
 
 if [[ -z "${ENV_TYPE}" ]]; then
@@ -86,12 +110,12 @@ if [[ "${PATHS_MODE}" == false ]]; then
   fi
 
   if [[ "${HAS_TIME}" == true ]]; then
-    START_EPOCH=$(date -j -f '%m-%d-%Y %H:%M' "${START_DATE}" +%s)
-    END_EPOCH=$(date -j -f '%m-%d-%Y %H:%M' "${END_DATE}" +%s)
+    START_EPOCH=$(parse_date "${START_DATE}" %s)
+    END_EPOCH=$(parse_date "${END_DATE}" %s)
     START_EPOCH_MS=$(( START_EPOCH * 1000 ))
     END_EPOCH_MS=$(( (END_EPOCH + 60) * 1000 - 1 ))
-    START_DAY=$(date -j -f '%m-%d-%Y %H:%M' "${START_DATE}" +%m-%d-%Y)
-    END_DAY=$(date -j -f '%m-%d-%Y %H:%M' "${END_DATE}" +%m-%d-%Y)
+    START_DAY=$(parse_date "${START_DATE}" %m-%d-%Y)
+    END_DAY=$(parse_date "${END_DATE}" %m-%d-%Y)
   else
     START_DAY="${START_DATE}"
     END_DAY="${END_DATE}"
@@ -101,12 +125,12 @@ fi
 # Enumerate each day in the range as MM-DD-YYYY strings (one per line)
 build_days() {
   local start_epoch end_epoch current
-  start_epoch=$(date -j -f '%m-%d-%Y' "${START_DAY}" +%s)
-  end_epoch=$(date -j -f '%m-%d-%Y' "${END_DAY}" +%s)
+  start_epoch=$(parse_date "${START_DAY}" %s)
+  end_epoch=$(parse_date "${END_DAY}" %s)
 
   current=$start_epoch
   while [[ $current -le $end_epoch ]]; do
-    date -j -r "$current" +%m-%d-%Y
+    epoch_to_date "$current" %m-%d-%Y
     current=$((current + 86400))
   done
 }

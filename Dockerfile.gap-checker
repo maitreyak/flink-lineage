@@ -1,0 +1,27 @@
+FROM debian:bookworm-slim
+
+ARG DUCKDB_VERSION=1.2.1
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends curl unzip ca-certificates && \
+    # Install DuckDB CLI
+    curl -fsSL "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/duckdb_cli-linux-amd64.zip" \
+      -o /tmp/duckdb.zip && \
+    unzip /tmp/duckdb.zip -d /usr/local/bin/ && \
+    chmod +x /usr/local/bin/duckdb && \
+    rm /tmp/duckdb.zip && \
+    # Install AWS CLI v2
+    curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" \
+      -o /tmp/awscli.zip && \
+    unzip /tmp/awscli.zip -d /tmp && \
+    /tmp/aws/install && \
+    rm -rf /tmp/aws /tmp/awscli.zip && \
+    # Cleanup
+    apt-get purge -y unzip && \
+    apt-get autoremove -y && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY scripts/check-offset-gaps.sh /usr/local/bin/check-offset-gaps.sh
+RUN chmod +x /usr/local/bin/check-offset-gaps.sh
+
+ENTRYPOINT ["check-offset-gaps.sh"]
