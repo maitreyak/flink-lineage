@@ -63,11 +63,17 @@ fi
 
 POD_NAME="gap-checker-$(date +%s)"
 
+cleanup() { kubectl delete pod "${POD_NAME}" -n "${NAMESPACE}" --ignore-not-found=true >/dev/null 2>&1; }
+trap cleanup EXIT
+
 echo "=== Running gap checker in EKS ==="
 kubectl run "${POD_NAME}" \
-  --rm -it \
   --namespace "${NAMESPACE}" \
   --image "${IMAGE}" \
   --overrides="{\"spec\":{\"serviceAccountName\":\"${SERVICE_ACCOUNT}\"}}" \
   --restart=Never \
   -- aws "${ARGS[@]}"
+
+kubectl wait --for=condition=Ready "pod/${POD_NAME}" -n "${NAMESPACE}" --timeout=60s >/dev/null 2>&1 || true
+kubectl logs -f "${POD_NAME}" -n "${NAMESPACE}"
+kubectl wait --for=jsonpath='{.status.phase}'=Succeeded "pod/${POD_NAME}" -n "${NAMESPACE}" --timeout=600s >/dev/null 2>&1

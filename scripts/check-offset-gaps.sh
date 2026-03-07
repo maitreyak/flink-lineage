@@ -78,6 +78,20 @@ if [[ "${ENV_TYPE}" == "aws" ]] && ! command -v aws &>/dev/null; then
   exit 1
 fi
 
+# IRSA (EKS pods): DuckDB httpfs doesn't support web identity tokens, so
+# exchange the token for temporary credentials that DuckDB can use.
+if [[ -n "${AWS_WEB_IDENTITY_TOKEN_FILE:-}" && -n "${AWS_ROLE_ARN:-}" ]]; then
+  CREDS=$(aws sts assume-role-with-web-identity \
+    --role-arn "${AWS_ROLE_ARN}" \
+    --role-session-name "gap-checker" \
+    --web-identity-token "$(cat "${AWS_WEB_IDENTITY_TOKEN_FILE}")" \
+    --query 'Credentials' --output json)
+  export AWS_ACCESS_KEY_ID=$(echo "${CREDS}" | grep -o '"AccessKeyId": "[^"]*' | cut -d'"' -f4)
+  export AWS_SECRET_ACCESS_KEY=$(echo "${CREDS}" | grep -o '"SecretAccessKey": "[^"]*' | cut -d'"' -f4)
+  export AWS_SESSION_TOKEN=$(echo "${CREDS}" | grep -o '"SessionToken": "[^"]*' | cut -d'"' -f4)
+  unset AWS_WEB_IDENTITY_TOKEN_FILE AWS_ROLE_ARN
+fi
+
 # Determine mode: --paths or date-range
 PATHS_MODE=false
 PATHS=()
