@@ -1,0 +1,18 @@
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: network-block-s3
+  namespace: flink-lineage
+spec:
+  action: partition
+  mode: all
+  selector:
+    namespaces:
+      - flink-lineage
+    labelSelectors:
+      app: flink-lineage
+  direction: to
+  externalTargets:
+    - s3.us-east-1.amazonaws.com
+    - s3.amazonaws.com
+  duration: "2m"

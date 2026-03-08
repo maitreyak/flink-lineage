@@ -1,0 +1,14 @@
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: pod-failure
+  namespace: flink-lineage
+spec:
+  action: pod-failure
+  mode: one
+  selector:
+    namespaces:
+      - flink-lineage
+    labelSelectors:
+      app: flink-lineage
+  duration: "30s"

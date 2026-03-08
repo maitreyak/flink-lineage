@@ -1,0 +1,51 @@
+# Chaos Mesh Helm values
+# Install: helm install chaos-mesh chaos-mesh/chaos-mesh -n chaos-mesh --create-namespace -f values.yaml
+#
+# Requires a "chaos-mesh" nodegroup in EKS with the taint:
+#   chaos-mesh=true:NoSchedule
+# e.g.:
+#   eksctl create nodegroup --cluster=<cluster> --name=chaos-mesh \
+#     --node-type=t3.medium --nodes=1 --nodes-min=1 --nodes-max=2 \
+#     --node-labels="nodegroup=chaos-mesh" \
+#     --taints="chaos-mesh=true:NoSchedule"
+
+controllerManager:
+  replicaCount: 1
+  nodeSelector:
+    nodegroup: chaos-mesh
+  tolerations:
+    - key: chaos-mesh
+      operator: Equal
+      value: "true"
+      effect: NoSchedule
+
+dashboard:
+  enabled: true
+  securityMode: false
+  nodeSelector:
+    nodegroup: chaos-mesh
+  tolerations:
+    - key: chaos-mesh
+      operator: Equal
+      value: "true"
+      effect: NoSchedule
+
+# chaosDaemon runs as a DaemonSet on ALL nodes (it needs host access to inject faults)
+# It must tolerate the chaos-mesh taint so it also runs on the chaos-mesh nodegroup
+chaosDaemon:
+  runtime: containerd
+  socketPath: /run/containerd/containerd.sock
+  tolerations:
+    - key: chaos-mesh
+      operator: Equal
+      value: "true"
+      effect: NoSchedule
+
+dnsServer:
+  nodeSelector:
+    nodegroup: chaos-mesh
+  tolerations:
+    - key: chaos-mesh
+      operator: Equal
+      value: "true"
+      effect: NoSchedule
